@@ -20,3 +20,4 @@ include = ["toygames*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: long cross-checks, skipped unless --runslow"]
