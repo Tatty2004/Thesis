@@ -19,13 +19,15 @@ Python 3.11+, numpy, scipy (`linprog` with HiGHS), POT (Earth Mover's Distance),
 Use `.venv/bin/python` (3.11, package installed with `pip install -e .`). The system `python3` is 3.9. OpenSpiel's `sequence_form_lp` needs cvxpy, which isn't installed, so tests use its `exploitability`, `expected_game_score` and CFR solvers instead.
 
 ## Commands
-- Tests (about 80 s): `.venv/bin/python -m pytest`
+- Tests (about 2 min): `.venv/bin/python -m pytest`. Add `--runslow` for the longest cross-checks (about 5 min more): the reference comparison at N = 4 with two streets, and OpenSpiel's grading at N = 4 (`independent`) and N = 5.
 - Sizes: `.venv/bin/python scripts/count_sizes.py --modes shared independent`
 - Experiments: `.venv/bin/python -m toygames.experiments.run toygames/experiments/configs/<name>.yaml --workers 6`
   - `benchmark.yaml`: full-game DCFR for N = 4 to 7, plus the LP up to N = 5.
   - `grid.yaml`: the bucketing grid for N = 5, 6 (about 45 min).
   - `grid_n7.yaml`: the same grid with N = 7 added (about 1.5 h more).
   - `grid_smoke.yaml`: a 1-minute end-to-end check.
+  - `certify.yaml`: Check B for N = 4 to 7 (see below). Saves each game's strategies.
+  - `certify_smoke.yaml`: a 20-second end-to-end check of it (N = 4).
   - `--force` reruns stored runs. `--reuse-any-commit` accepts runs stored by an older clean commit.
 
 ## Games
@@ -49,6 +51,11 @@ Use `.venv/bin/python` (3.11, package installed with `pip install -e .`). The sy
 - **Flow:** ante, one private card each, one card to each board, bet. With 2 streets: a second card to each board, bet. Then showdown.
 - **Ranking per board:** your card matches any card on that board = pair of your rank, else high card of your rank. Pair beats high card, higher rank wins, equal splits. Each board wins half the pot. Folds skip evaluation.
 - **Deck modes:** `shared` = one deck (real play, boards block each other). `independent` = each board from its own deck copy minus both private cards (no board-to-board blocking). `identical` = board B copies board A, and must reproduce `num_boards=1` exactly.
+- **Rule readings** (both implementations follow them, see Check A):
+  - A paired board gives nobody a pair: only your own card matching a board card counts. There are no kickers.
+  - A tie needs equal private ranks, which tie both boards, so a one-board tie never happens.
+  - The opening bet counts toward `max_raises`, so the default allows a bet and one raise per street.
+  - In `independent`, both private cards come from one deck.
 - **Why 2 streets:** with 1 street every card is known before betting, so it's a tiny river spot. With 2, first-street hands are distributions over future (equity A, equity B), which is what bucketing has to handle.
 
 **Sizes** (2 streets, 2 boards, shared deck, rank-level keys, from `scripts/count_sizes.py`):
@@ -77,6 +84,30 @@ OpenSpiel catches game bugs, LP catches solver bugs, and `identical` extends bot
 - Tests: `tests/test_step1_kuhn.py`, `test_step2_leduc.py`, and `test_board_leduc.py` (steps 3 and 4). `test_step5_abstraction.py` covers the bucketing and `test_rules.py` the layering rules.
 - Our CFR, CFR+ and DCFR reproduce OpenSpiel's average strategies at every iteration.
 - A lockstep walk checks Leduc against OpenSpiel node by node.
+
+**Independent checks (2026-09-29).** The ladder checks our game against OpenSpiel only for Kuhn and Leduc, and certifies two-board equilibria with our own best response. Two more checks close that gap.
+- **Check A: the game is coded to the rules** (`tests/test_reference.py`).
+  - `tests/reference_board_leduc.py` is a second implementation, written by a separate agent from a rules brief. It never saw `toygames/` (CLAUDE.md's prose was in its context). It deals real suited cards, every card equally likely, and has its own betting, pot and showdown code.
+  - `tests/game_diff.py` walks both games and compares every rank-level history: chance probability summed over suits, payoff, player to act, legal actions, and the information partition.
+  - They agree in all 16 configurations: N = 3 and 4, one and two streets, every deck mode, one and two boards.
+    - Probabilities agree to 1e-15 (relative), and payoffs are identical.
+    - The largest case, N = 4 `independent` with two streets, compares 121,332 histories built from 3.9 million card-level nodes.
+    - Our LP gives the same value on the card-level reference.
+  - `tests/mutants.py` injects 15 plausible bugs into copies of our game, and the comparison catches every one.
+  - Limit: a misreading of the rules that both implementations share would pass. The rule readings above are the ones to confirm.
+- **Check B: the strategies are equilibria** (`tests/test_equilibrium.py`, `experiments/certify.py`).
+  - **OpenSpiel grading:** `tests/openspiel_game.py` wraps our game as an OpenSpiel Python game.
+    - OpenSpiel's own best-response and expected-value code reproduce our best responses, value and exploitability to 1e-9. This holds at N = 4 in every deck mode, at N = 5 (`--runslow`), and for random strategies.
+    - OpenSpiel's DCFR reproduces our iterates on two-board games (N = 3, every deck mode, first 5 iterations, to 1e-10).
+  - **LP best response:** `best_response_lp` (HiGHS) reproduces our best response to under 1e-9, up to N = 7.
+  - **Value brackets:** DCFR, CFR+, vanilla CFR and the LP (N <= 5) give brackets that overlap, and every bracket contains the LP value.
+  - **Dominated actions** (`eval/audit.py`): the only ones are folding a hand that can't lose. No hand is ever drawing dead. The DCFR strategy plays them at a reach-weighted rate of 1e-10 to 5e-10 (a few folds per 10 billion such spots), far inside the best-response bound.
+  - **Board swap:** swapping boards A and B in a strategy changes its exploitability by at most 3e-15.
+  - **`certify.yaml` run** (N = 4 to 7, `shared` and `independent`, commit `6a09660`):
+    - All 8 games pass.
+    - The table is in `results/cd34feafa14e/certify.md`.
+    - Each run folder keeps `strategy_dcfr.npz`, plus `strategy_lp.npz` for N <= 5.
+  - Limit: this certifies an epsilon-equilibrium with epsilon about 1e-5 chips per hand (DCFR tolerance 1e-5). It is exact only where the LP runs (N <= 5), and only for the game as coded. Check A covers the coding.
 
 ## Bucketing experiment
 
@@ -149,6 +180,7 @@ Symmetric for player 1. Compare values within 1e-6.
   - A stored run is reused only when it came from the current clean commit.
 - Log every k iterations: iteration, wall time, exploitability, each player's BR value, game value. Freeze after step 4. **Frozen** as `iteration, wall_time, exploitability, br_value_p0, br_value_p1, game_value`. `wall_time` counts seconds spent iterating and excludes logging.
 - Commit every new version, one commit per working step or fix, and push to `origin` (github.com/Tatty2004/Thesis). Run experiments from a clean commit so their results can be reused.
+- Saved strategies (`certify` runs): `strategy_dcfr.npz` and `strategy_lp.npz` in the run folder hold {infoset key: action probabilities}. `toygames.tree.load_strategy(path)` loads one. `.table()` gives the dict, and `.sigma(tree)` gives the arrays for a compiled tree.
 
 ## Gotchas
 - Exploitability on the current strategy looks wrong for CFR and misleadingly good for CFR+.
@@ -159,19 +191,27 @@ Symmetric for player 1. Compare values within 1e-6.
 - In `independent`, each board's second card comes from that board's own deck copy.
 - **k-means needs restarts.** A single k-means++ start stalls in a poor local optimum on these few points; it missed the optimum in 16 to 44% of public states. A lower clustering objective doesn't always mean lower exploitability.
 - **Exact ties defeat k-means.** Rank-level equities produce exact ties, such as evenly spaced 1D points, which Lloyd's iterations can't break, and restarts don't help. `avg_1d` at k = 3 misses the exact optimum in 5 to 10% of states at N = 5.
+- **HiGHS tolerances are absolute.** Chance-weighted payoffs are tiny, so an unscaled best-response LP stops about 1e-8 short of the optimum. `best_response_lp` scales the costs so the largest entry is 1.
+- **Some rules can never be tested in Board-Leduc.**
+  - A one-board tie never happens: it needs equal ranks, which tie both boards. "A tie splits only that half" is tested through `settle()` directly.
+  - No hand is ever drawing dead: the other card of your rank is either on a board, so you pair, or possibly in the opponent's hand, so you might tie.
 - **N = 3 is degenerate.** With two shared boards and one street, the value is exactly 0. No hand can both win and lose, so betting extracts nothing.
 
 ## Layout
 ```
 toygames/
   games/        base.py (Game and CardGame protocols, limit-betting engine), kuhn.py, leduc.py, board_leduc.py
-  tree.py       compile a Game to flat (sequence-form) arrays, strategy utilities
-  solvers/      cfr.py (CFR, CFR+, DCFR), lp.py
-  eval/         best_response.py, exploitability.py
+  tree.py       compile a Game to flat (sequence-form) arrays, strategy utilities, saved strategies
+  solvers/      cfr.py (CFR, CFR+, DCFR), lp.py (sequence-form LP, best response as an LP)
+  eval/         best_response.py, exploitability.py, audit.py (dominated actions)
   abstraction/  features.py, bucketing.py, abstract_game.py
-  experiments/  configs/*.yaml, run.py (runner and bookkeeping), grid.py (bucketing grid, table, plot)
+  experiments/  configs/*.yaml, run.py (runner and bookkeeping), grid.py (bucketing grid, table, plot),
+                certify.py (Check B)
 scripts/count_sizes.py
 tests/          a test file per ladder step, test_step5_abstraction.py, test_rules.py, helpers.py (brute force, OpenSpiel glue)
+                test_reference.py (Check A): reference_board_leduc.py, game_diff.py, mutants.py
+                test_equilibrium.py (Check B): openspiel_game.py
+                conftest.py (--runslow)
 results/        gitignored
 pyproject.toml
 ```
@@ -185,9 +225,10 @@ pyproject.toml
 
 Dates are targets. The order is fixed.
 
-**Status:** all five steps were done in order on 2026-09-28/29 (commits `7a76758` to `dad9622`).
+**Status:** all five steps were done in order on 2026-09-28/29 (commits `7a76758` to `dad9622`). Checks A and B followed on 2026-09-29 (commits `902699e` to `6a09660`).
 
 ## Open decisions
 - Bet sizes (default `[2, 4]`, copied from Leduc). Still the default everywhere.
 - ~~Leave Python only if the N = 6 benchmark is too slow for the grid.~~ Resolved: stay in Python. DCFR takes 34 ms per iteration at N = 6 and 88 ms at N = 7. The LP solves N = 5 in 27 to 69 s.
 - Whether to extend the grid to larger N (or larger k per public state), since the 1D advantage shrinks at N = 7.
+- Confirm the Board-Leduc rule readings (under Games). Claude proposed them on 2026-09-29 for Check A. They match the rules text, but the user hasn't explicitly confirmed them.
