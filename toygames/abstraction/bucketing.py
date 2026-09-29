@@ -11,12 +11,15 @@ Methods, compared at the same bucket count k:
              histograms. Last street: kmeans_2d.
   lossless   one bucket per hand.
 
-Every k-means weights hands by probability and starts from k-means++ seeded by
-`seed`. A public state with at most k distinct features gives each its own bucket.
-Buckets are numbered weakest first (by the center's mean equity).
+Every k-means weights hands by probability and starts from k-means++. Each public
+state gets its own random stream derived from `seed`, shared by both players, so a
+public state has one bucketing. A public state with at most k distinct features
+gives each its own bucket. Buckets are numbered weakest first (by the center's mean
+equity).
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 
@@ -43,19 +46,25 @@ class Bucketing:
         return np.array([len(set(m.values())) for m in self.table[street].values()])
 
 
+def public_state_rng(seed: int, street: int, board: tuple) -> np.random.Generator:
+    """A random stream for one public state. Both players share it, so identical
+    features give identical buckets, and no state's buckets depend on the others."""
+    digest = hashlib.sha256(repr((street, board)).encode()).digest()
+    return np.random.default_rng([seed, int.from_bytes(digest[:8], "little")])
+
+
 def make_bucketing(features: Features, method: str, k: int | None, seed: int) -> Bucketing:
     if method not in METHODS:
         raise ValueError(f"unknown method {method!r}")
     if method == "product" and math.isqrt(k) ** 2 != k:
         raise ValueError("product bucketing needs k to be a perfect square")
-    rng = np.random.default_rng(seed)
     table = []
     for t in range(features.num_streets):
         last = t == features.num_streets - 1
         tab = {}
-        for key in sorted(features.streets[t]):
-            hf = features.streets[t][key]
-            tab[key] = dict(zip(hf.hands, (int(b) for b in _labels(hf, method, k, rng, last))))
+        for (player, board), hf in features.streets[t].items():
+            rng = public_state_rng(seed, t, board)
+            tab[(player, board)] = dict(zip(hf.hands, (int(b) for b in _labels(hf, method, k, rng, last))))
         table.append(tab)
     return Bucketing(method, k, seed, features.board_len, table)
 

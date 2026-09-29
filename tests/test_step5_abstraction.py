@@ -115,6 +115,23 @@ def test_bucket_counts(mode, method, k):
     assert make_bucketing(feats, method, k, seed=0).table == b.table  # seeded
 
 
+@pytest.mark.parametrize("method, k", [("avg_1d", 2), ("product", 4), ("kmeans_2d", 3), ("emd_2d", 2)])
+def test_one_bucketing_per_public_state(method, k):
+    # Both players see the same features here, so they must get the same buckets,
+    # and the buckets of a public state don't depend on which other states exist.
+    _, _, feats = setup("shared")
+    b = make_bucketing(feats, method, k, seed=3)
+    for t in range(2):
+        for (p, board), labels in b.table[t].items():
+            if p == 0:
+                assert labels == b.table[t][(1, board)]
+    board = next(iter(feats.streets[0]))[1]
+    single = type(feats)(feats.num_streets, feats.num_boards, feats.board_len,
+                         [{key: hf for key, hf in feats.streets[0].items() if key[1] == board}, {}])
+    alone = make_bucketing(single, method, k, seed=3)
+    assert alone.table[0][(0, board)] == b.table[0][(0, board)]
+
+
 def test_product_needs_square_k():
     _, _, feats = setup("shared")
     with pytest.raises(ValueError):
