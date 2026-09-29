@@ -14,13 +14,25 @@ It says nothing about real PLO strategy, and it doesn't test hands where differe
 - **Don't expand scope.** No Hold'em/PLO evaluation, neural methods, multiway, two-private-card variants, or performance work beyond what the experiment needs. If something seems necessary, stop and ask.
 
 ## Stack
-Python 3.11+, numpy, scipy (`linprog` with HiGHS), POT (Earth Mover's Distance), pyyaml, pytest. `open_spiel` only inside `tests/` for cross-checks.
+Python 3.11+, numpy, scipy (`linprog` with HiGHS), POT (Earth Mover's Distance), pyyaml, pytest, matplotlib (plots only, in `experiments/`). `open_spiel` only inside `tests/` for cross-checks.
+
+Use `.venv/bin/python` (3.11, package installed with `pip install -e .`). The system `python3` is 3.9. OpenSpiel's `sequence_form_lp` needs cvxpy, which isn't installed, so tests use its `exploitability`, `expected_game_score` and CFR solvers instead.
+
+## Commands
+- Tests (about 80 s): `.venv/bin/python -m pytest`
+- Sizes: `.venv/bin/python scripts/count_sizes.py --modes shared independent`
+- Experiments: `.venv/bin/python -m toygames.experiments.run toygames/experiments/configs/<name>.yaml --workers 6`
+  - `benchmark.yaml`: full-game DCFR for N = 4 to 7, plus the LP up to N = 5.
+  - `grid.yaml`: the bucketing grid for N = 5, 6 (about 45 min).
+  - `grid_n7.yaml`: the same grid with N = 7 added (about 1.5 h more).
+  - `grid_smoke.yaml`: a 1-minute end-to-end check.
+  - `--force` reruns stored runs. `--reuse-any-commit` accepts runs stored by an older clean commit.
 
 ## Games
 
 **Kuhn.** Deck J, Q, K. Ante 1, one card each, one betting round, bet 1, at most one bet. Player 0's value is -1/18.
 
-**Leduc.** Must match OpenSpiel's `leduc_poker`. 3 ranks x 2 suits. Ante 1, one card each. Betting (size 2, max 2 raises), one board card, betting (size 4, max 2 raises). Pairing the board wins, else higher card.
+**Leduc.** Must match OpenSpiel's `leduc_poker`. 3 ranks x 2 suits. Ante 1, one card each. Betting (size 2, max 2 raises), one board card, betting (size 4, max 2 raises). Pairing the board wins, else higher card. Fold is legal only when facing a bet. With rank-level keys it is identical to `leduc_poker(suit_isomorphism=True)` (288 infosets, 1,116 terminals). It also matches the card-level default up to suits: its 936 infosets map onto the 288.
 
 **Board-Leduc** (new, defined here). Always a bomb pot: no betting before the first board cards.
 
@@ -61,6 +73,11 @@ Expect LP up to N = 4 (try 5) and full-game DCFR plus exact best response throug
 
 OpenSpiel catches game bugs, LP catches solver bugs, and `identical` extends both to the double-board game.
 
+**Status (2026-09-29): steps 1 to 4 pass.**
+- Tests: `tests/test_step1_kuhn.py`, `test_step2_leduc.py`, and `test_board_leduc.py` (steps 3 and 4). `test_step5_abstraction.py` covers the bucketing and `test_rules.py` the layering rules.
+- Our CFR, CFR+ and DCFR reproduce OpenSpiel's average strategies at every iteration.
+- A lockstep walk checks Leduc against OpenSpiel node by node.
+
 ## Bucketing experiment
 
 **Features** (vs a uniform opponent range over remaining cards, per public state):
@@ -76,6 +93,14 @@ OpenSpiel catches game bugs, LP catches solver bugs, and `identical` extends bot
 
 Buckets are per public state. Street-2 keys keep the street-1 bucket (perfect recall).
 
+**Implementation choices** (decided 2026-09-28/29):
+- **Opponent range:** "uniform opponent range" is the exact card-removal posterior from the deal model. With `shared` that is uniform over the remaining cards. With `independent` it also accounts for each board's copy excluding both private cards.
+- **Street-1 histogram:** one exact atom per possible next deal (identical points merged), not binned.
+- **k-means:** every k-means weights hands by probability and keeps the best of 20 k-means++ restarts per public state (lowest weighted sum of squared distances). Each public state gets its own random stream from the seed, shared by both players, so both players get the same buckets.
+- **`emd_2d`:** EMD from POT with Euclidean ground distance. Each center is the weighted mixture of its members' histograms, and restarts are compared by the weighted sum of squared EMD.
+- **Bucketed game:** the full tree with infosets merged, and terminals summed when they share a pair of abstract sequences. Solver, best response and exploitability run on it unchanged.
+- **Solver tolerance:** 5e-5, well below the smallest nonzero total error (0.018).
+
 **Measuring error:**
 1. Solve the bucketed game with DCFR to a fixed tolerance. Its exploitability inside the bucketed game is **solver error**.
 2. Map the strategy back to the full game and compute exact exploitability. That's **total error**.
@@ -86,6 +111,19 @@ Buckets are per public state. Street-2 keys keep the street-1 bucket (perfect re
 **Questions:** Does `kmeans_2d` beat `avg_1d`? Does `emd_2d` beat `kmeans_2d` on street 1? Does the gap change between `shared` and `independent`? Negative answers are results too. Don't assert error falls as k grows (Waugh et al. 2009). Log it.
 
 **Done when:** steps 1 to 4 pass, and the table and plot exist for N = 5 and 6.
+
+**Done (2026-09-29, commit `dad9622`, N = 5, 6 and 7).** Tables and plots are in `results/f5e9715c3f20/` (N = 5, 6) and `results/0ab89ea4b2e7/` (N = 5 to 7). `results/` is gitignored, so rerun `grid_n7.yaml` to regenerate them. Findings (total error in chips per hand, mean of 5 seeds):
+- **`kmeans_2d` does not beat `avg_1d`.** The baseline has lower error in 101 of 120 (N, deck, k, seed) cases.
+  - At N = 5 and 6 it wins every cell by 0.014 to 0.09. The exception is N = 5, k = 5, where k covers every hand and the 2D methods are lossless.
+  - At N = 7 the gap closes, and `kmeans_2d` edges ahead at shared k = 2 and 5.
+  - Brute-force optimal clusterings at N = 6, k = 2 and 3 still put `avg_1d` ahead.
+  - A possible reason (hypothesis): each board is half the pot, so showdown value is linear in average equity.
+- **`emd_2d` beats `kmeans_2d`, modestly.** It is lower in 87 of 120 cases and tied in 19. The margin is at most 0.017, and 0.01 or less in 17 of 24 cells. At N = 7 it is the best method in 4 of 8 cells.
+- **Shared vs independent:** no consistent effect. The 2D penalty is smaller with independent boards at k = 2 and 3 for N = 5 and 6, but not at k = 4 and 5.
+- **Other results:**
+  - `product` is the worst method at k = 4, with 2 to 4 times the error of `avg_1d`.
+  - Total error never increased with k for any method or seed.
+  - When k is at least the number of hands per public state (N = 5, k = 5), the 2D methods are exactly lossless.
 
 ## Solvers
 
@@ -99,12 +137,18 @@ Symmetric for player 1. Compare values within 1e-6.
 
 **Exploitability** = NashConv / 2, in chips per hand, on the **average** strategy. Matches OpenSpiel.
 
+**Implementation.** `tree.py` compiles a game into sequence-form arrays. Each player's sequences are grouped by level. Each terminal is stored as (player 0's last sequence, player 1's last sequence, chance x payoff). A CFR iteration or a best response is then one gather and one bincount over the terminals, plus one pass per level of sequences.
+
 ## Conventions
 - Player 0 acts first each street. `returns()` sums to zero.
 - Infoset keys: ranks only, full history from every street, never the opponent's card. Test all three.
 - Chance outcomes are rank-level with multiplicities, conditioned on cards already dealt.
-- Seed everything. Each run writes config, seed, and git hash to `results/<config hash>/`.
-- Log every k iterations: iteration, wall time, exploitability, each player's BR value, game value. Freeze after step 4.
+- Seed everything. Each run writes config, seed, and git hash to `results/<config hash>/` (`config.yaml`, `meta.json`, `log.csv`, `result.json`).
+  - A sweep's summary goes to `results/<sweep config hash>/`. Trees and features are cached in `results/cache/`.
+  - The git hash is read once per invocation and passed to the workers. "Dirty" means uncommitted changes under `toygames/` or in `pyproject.toml`.
+  - A stored run is reused only when it came from the current clean commit.
+- Log every k iterations: iteration, wall time, exploitability, each player's BR value, game value. Freeze after step 4. **Frozen** as `iteration, wall_time, exploitability, br_value_p0, br_value_p1, game_value`. `wall_time` counts seconds spent iterating and excludes logging.
+- Commit every new version, one commit per working step or fix, and push to `origin` (github.com/Tatty2004/Thesis). Run experiments from a clean commit so their results can be reused.
 
 ## Gotchas
 - Exploitability on the current strategy looks wrong for CFR and misleadingly good for CFR+.
@@ -113,19 +157,23 @@ Symmetric for player 1. Compare values within 1e-6.
 - Raise counters reset each street. Bet size changes each street.
 - A tie on one board splits only that half.
 - In `independent`, each board's second card comes from that board's own deck copy.
+- **k-means needs restarts.** A single k-means++ start stalls in a poor local optimum on these few points; it missed the optimum in 16 to 44% of public states. A lower clustering objective doesn't always mean lower exploitability.
+- **Exact ties defeat k-means.** Rank-level equities produce exact ties, such as evenly spaced 1D points, which Lloyd's iterations can't break, and restarts don't help. `avg_1d` at k = 3 misses the exact optimum in 5 to 10% of states at N = 5.
+- **N = 3 is degenerate.** With two shared boards and one street, the value is exactly 0. No hand can both win and lose, so betting extracts nothing.
 
 ## Layout
 ```
 toygames/
-  games/        base.py, kuhn.py, leduc.py, board_leduc.py
-  tree.py       compile a Game to flat arrays
-  solvers/      cfr.py, lp.py
+  games/        base.py (Game and CardGame protocols, limit-betting engine), kuhn.py, leduc.py, board_leduc.py
+  tree.py       compile a Game to flat (sequence-form) arrays, strategy utilities
+  solvers/      cfr.py (CFR, CFR+, DCFR), lp.py
   eval/         best_response.py, exploitability.py
   abstraction/  features.py, bucketing.py, abstract_game.py
-  experiments/  configs/*.yaml, run.py
+  experiments/  configs/*.yaml, run.py (runner and bookkeeping), grid.py (bucketing grid, table, plot)
 scripts/count_sizes.py
-tests/
+tests/          a test file per ladder step, test_step5_abstraction.py, test_rules.py, helpers.py (brute force, OpenSpiel glue)
 results/        gitignored
+pyproject.toml
 ```
 
 ## Build order
@@ -137,6 +185,9 @@ results/        gitignored
 
 Dates are targets. The order is fixed.
 
+**Status:** all five steps were done in order on 2026-09-28/29 (commits `7a76758` to `dad9622`).
+
 ## Open decisions
-- Bet sizes (default `[2, 4]`, copied from Leduc).
-- Leave Python only if the N = 6 benchmark is too slow for the grid.
+- Bet sizes (default `[2, 4]`, copied from Leduc). Still the default everywhere.
+- ~~Leave Python only if the N = 6 benchmark is too slow for the grid.~~ Resolved: stay in Python. DCFR takes 34 ms per iteration at N = 6 and 88 ms at N = 7. The LP solves N = 5 in 27 to 69 s.
+- Whether to extend the grid to larger N (or larger k per public state), since the 1D advantage shrinks at N = 7.
