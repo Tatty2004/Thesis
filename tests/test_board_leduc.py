@@ -134,6 +134,17 @@ def test_independent_boards_do_not_block_each_other():
     probs = dict(g.chance_outcomes(s))
     # Board B's copy is the deck minus both private cards: board A's 2 doesn't matter.
     assert probs == pytest.approx({0: 1 / 6, 1: 1 / 6, 2: 2 / 6, 3: 2 / 6})
+    # Second cards: board B's comes from B's copy minus B's first card, whatever A shows.
+    s = g.next_state(s, 3)                       # board B's first card: a 3
+    s = g.next_state(g.next_state(s, "c"), "c")  # check through street 1
+    s = g.next_state(s, 3)                       # board A's second card: a 3
+    assert g.events[s.step] == ("board", 1)
+    assert dict(g.chance_outcomes(s)) == pytest.approx({0: 1 / 5, 1: 1 / 5, 2: 2 / 5, 3: 1 / 5})
+    shared = BoardLeduc(num_ranks=4, num_boards=2, streets=2, deck_mode="shared")
+    s = shared.initial_state()
+    for a in (0, 1, 2, 3, "c", "c", 3):
+        s = shared.next_state(s, a)
+    assert dict(shared.chance_outcomes(s)) == pytest.approx({0: 1 / 3, 1: 1 / 3, 2: 1 / 3})
 
 
 # Structural checks -----------------------------------------------------------------

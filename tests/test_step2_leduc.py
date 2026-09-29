@@ -111,6 +111,23 @@ def test_dcfr_matches_lp(tree, lp):
     assert last["game_value"] == pytest.approx(v_lp, abs=2 * last["exploitability"])
 
 
+def test_dcfr_value_matches_vanilla_cfr(tree, lp):
+    (v_lp, _), _ = lp
+    d = CFR(tree, "dcfr").run(iterations=2000, log_every=2000)[-1]
+    c = CFR(tree, "cfr").run(iterations=5000, log_every=5000)[-1]
+    # Each value is within NashConv = 2 x exploitability of the game value.
+    assert abs(d["game_value"] - c["game_value"]) <= 2 * (d["exploitability"] + c["exploitability"])
+    assert abs(c["game_value"] - v_lp) <= 2 * c["exploitability"]
+
+
+def test_swapped_discounts_are_much_slower(tree):
+    # Swapping alpha and beta still converges, just slowly, so check the rate.
+    right = CFR(tree, "dcfr", alpha=1.5, beta=0.0).run(iterations=2000, log_every=2000)[-1]
+    swapped = CFR(tree, "dcfr", alpha=0.0, beta=1.5).run(iterations=2000, log_every=2000)[-1]
+    assert right["exploitability"] < 1e-4
+    assert swapped["exploitability"] > 100 * right["exploitability"]
+
+
 def test_dcfr_iterates_match_openspiel(tree, os_iso, map_iso):
     os_solver = discounted_cfr.DCFRSolver(os_iso)
     ours = CFR(tree, "dcfr")

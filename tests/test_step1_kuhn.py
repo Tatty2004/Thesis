@@ -86,6 +86,22 @@ def test_dcfr_exploitability_goes_to_zero(tree):
     assert rows[-1]["game_value"] == pytest.approx(KUHN_VALUE, abs=1e-6)
 
 
+@pytest.mark.parametrize("variant", ["cfr", "cfr+", "dcfr"])
+def test_log_uses_average_strategy(tree, variant):
+    # The current strategy is the wrong thing to measure (it oscillates under CFR, and
+    # looks misleadingly good under CFR+); the log must use the average.
+    solver = CFR(tree, variant)
+    for _ in range(25):
+        solver.iteration()
+    row = solver.log_row()
+    avg = exploitability(tree, solver.average_strategy())
+    cur = exploitability(tree, solver.current_strategy())
+    assert row["exploitability"] == avg.exploitability
+    assert (row["br_value_p0"], row["br_value_p1"]) == avg.br_value
+    assert row["game_value"] == avg.game_value
+    assert cur.exploitability != avg.exploitability
+
+
 @pytest.mark.parametrize("variant", ["cfr", "cfr+"])
 def test_other_variants_converge(tree, variant):
     rows = CFR(tree, variant).run(iterations=2000, log_every=2000)
