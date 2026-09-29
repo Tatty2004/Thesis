@@ -1,0 +1,20 @@
+# Step 4 benchmark: full-game DCFR with exact best response, N = 4 to 7.
+# The LP runs too wherever num_ranks <= lp_max_ranks.
+title: "Step 4 benchmark: full-game DCFR + exact best response"
+experiment: solve
+seed: 0
+game:
+  name: board_leduc
+  num_boards: 2
+  streets: 2
+sweep:
+  num_ranks: [4, 5, 6, 7]
+  deck_mode: [shared, independent]
+solver:
+  variant: dcfr
+  alpha: 1.5
+  beta: 0.0
+  gamma: 2.0
+  iterations: 2000
+  log_every: 50
+lp_max_ranks: 5

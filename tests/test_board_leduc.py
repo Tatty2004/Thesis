@@ -13,7 +13,8 @@ from toygames.tree import compile_game, strategy_table
 
 MODES = ["shared", "independent", "identical"]
 STEP3 = [dict(num_ranks=3, streets=1), dict(num_ranks=4, streets=1)]
-CONFIGS = STEP3
+STEP4 = [dict(num_ranks=4, streets=2)]
+CONFIGS = STEP3 + STEP4
 
 
 def cfg_id(cfg):
@@ -235,6 +236,15 @@ def shared_sizes(n, streets):
 def test_sizes(cfg):
     tree = tree_of(BoardLeduc(num_boards=2, **cfg))
     assert (sum(tree.n_infosets), tree.n_terminals) == shared_sizes(cfg["num_ranks"], cfg["streets"])
+
+
+def test_sizes_match_claude_md():
+    # Two streets, two shared boards, rank-level keys (the table in CLAUDE.md).
+    table = {4: (18_360, 65_616), 5: (67_320, 366_660), 6: (184_860, 1_333_080), 7: (424_116, 3_779_454)}
+    for n, sizes in table.items():
+        assert shared_sizes(n, 2) == sizes
+    tree = tree_of(BoardLeduc(num_ranks=4, num_boards=2, streets=2))
+    assert (sum(tree.n_infosets), tree.n_terminals) == table[4]
 
 
 # Infoset keys ---------------------------------------------------------------------
