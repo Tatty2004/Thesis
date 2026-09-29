@@ -1,0 +1,25 @@
+# Step 5: the bucketing experiment with N = 7 added ("7 if fast").
+# Every bucketed game is solved with DCFR until its exploitability inside the
+# bucketed game is <= tol (solver error), then the strategy is mapped back and its
+# exact full-game exploitability computed (total error).
+title: "Bucketing experiment: total error vs k (N = 5, 6, 7)"
+experiment: grid
+seed: 0
+game:
+  name: board_leduc
+  num_boards: 2
+  streets: 2
+games:
+  num_ranks: [5, 6, 7]
+  deck_mode: [shared, independent]
+methods: [avg_1d, product, kmeans_2d, emd_2d]
+ks: [2, 3, 4, 5]
+seeds: [0, 1, 2, 3, 4]
+solver:
+  variant: dcfr
+  alpha: 1.5
+  beta: 0.0
+  gamma: 2.0
+  tol: 5.0e-5
+  max_iterations: 30000
+  log_every: 10

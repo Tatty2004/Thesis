@@ -69,19 +69,27 @@ def start_run(cfg: dict) -> Path:
     return run_dir
 
 
+REUSE = {"any_commit": False}  # set by --reuse-any-commit
+
+
 def cached_result(cfg: dict, force: bool) -> dict | None:
-    """The stored result of this run if it was produced by the current clean commit."""
+    """The stored result of this run, if a clean commit produced it: the current commit
+    by default, any commit with --reuse-any-commit (each result keeps its own git hash)."""
     run_dir = RESULTS / config_hash(cfg)
     if force or not (run_dir / "result.json").exists():
         return None
     meta = json.loads((run_dir / "meta.json").read_text())
     now = git_info()
-    if now["git_dirty"] or meta.get("git_dirty") or meta.get("git_hash") != now["git_hash"]:
+    if meta.get("git_dirty"):
+        return None
+    if not REUSE["any_commit"] and (now["git_dirty"] or meta.get("git_hash") != now["git_hash"]):
         return None
     return json.loads((run_dir / "result.json").read_text())
 
 
 def finish_run(run_dir: Path, result: dict) -> dict:
+    meta = json.loads((run_dir / "meta.json").read_text())
+    result = {**result, "git_hash": meta["git_hash"], "git_dirty": meta["git_dirty"]}
     (run_dir / "result.json").write_text(json.dumps(result, indent=2))
     return result
 
@@ -100,8 +108,16 @@ def build_game(gcfg: dict):
     return make_game(gcfg["name"], **params)
 
 
+_LAST_TREE: dict = {}
+
+
 def tree_for(gcfg: dict):
-    return load_or_compile(build_game(gcfg), CACHE / "trees")
+    """The compiled tree, cached on disk and (the last one) in memory."""
+    game = build_game(gcfg)
+    if _LAST_TREE.get("name") != game.name:
+        _LAST_TREE.clear()
+        _LAST_TREE.update(name=game.name, tree=load_or_compile(game, CACHE / "trees"))
+    return _LAST_TREE["tree"]
 
 
 def seed_everything(seed: int) -> None:
@@ -188,7 +204,10 @@ def main(argv=None):
     ap.add_argument("config")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--force", action="store_true", help="rerun runs that already have results")
+    ap.add_argument("--reuse-any-commit", action="store_true",
+                    help="reuse clean results from earlier commits too (each keeps its git hash)")
     args = ap.parse_args(argv)
+    REUSE["any_commit"] = args.reuse_any_commit
     cfg = yaml.safe_load(Path(args.config).read_text())
     out = start_run(cfg)
     print(f"results/{out.name}/  ({git_info()['git_hash'][:10]}{' dirty' if git_info()['git_dirty'] else ''})",

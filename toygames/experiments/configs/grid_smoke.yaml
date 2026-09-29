@@ -1,0 +1,22 @@
+# Quick end-to-end check of the grid pipeline (N = 4, two seeds).
+title: "Bucketing grid smoke test"
+experiment: grid
+seed: 0
+game:
+  name: board_leduc
+  num_boards: 2
+  streets: 2
+games:
+  num_ranks: [4]
+  deck_mode: [shared, independent]
+methods: [avg_1d, product, kmeans_2d, emd_2d]
+ks: [2, 4]
+seeds: [0, 1]
+solver:
+  variant: dcfr
+  alpha: 1.5
+  beta: 0.0
+  gamma: 2.0
+  tol: 1.0e-4
+  max_iterations: 20000
+  log_every: 10
