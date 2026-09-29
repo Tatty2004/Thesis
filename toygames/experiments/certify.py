@@ -176,14 +176,15 @@ def run_certify(cfg: dict, out: Path, workers: int, force: bool, git: dict) -> N
             "lp_value": r.get("lp", {}).get("value_p0_lp"),
             "lp_br_diff": r.get("lp_br", {}).get("max_diff"),
             "dominated": a["p0"]["dominated"] + a["p1"]["dominated"],
+            "mistake_rate": max(a["p0"]["mistake_rate"], a["p1"]["mistake_rate"]),
             "audit_ratio": max(a[q]["bound_sum"] / a[q]["br_gain"] if a[q]["br_gain"] > 0 else 0.0
                                for q in ("p0", "p1")),
             "swap_diff": r["swap"]["max_diff"], "ok": r["ok"], "run": config_hash(run)})
     cols = ["N", "deck", "infosets", "dcfr_its", "dcfr_expl", "cfr+_expl", "cfr_expl", "lower", "width", "lp_value",
-            "lp_br_diff", "dominated", "audit_ratio", "swap_diff", "ok", "run"]
+            "lp_br_diff", "dominated", "mistake_rate", "audit_ratio", "swap_diff", "ok", "run"]
     fmt = {"infosets": "{:,}", "dcfr_expl": "{:.2e}", "cfr+_expl": "{:.2e}", "cfr_expl": "{:.2e}",
            "lower": "{:+.8f}", "width": "{:.1e}", "lp_value": "{:+.8f}", "lp_br_diff": "{:.1e}",
-           "dominated": "{:,}", "audit_ratio": "{:.1e}", "swap_diff": "{:.1e}"}
+           "dominated": "{:,}", "mistake_rate": "{:.1e}", "audit_ratio": "{:.1e}", "swap_diff": "{:.1e}"}
     table = markdown_table(rows, cols, fmt)
     lp_inside = [r["brackets"]["lp_value_inside_all"] for r in results if "lp_value_inside_all" in r["brackets"]]
     notes = [
@@ -194,8 +195,10 @@ def run_certify(cfg: dict, out: Path, workers: int, force: bool, git: dict) -> N
         f"- `lp_br_diff`: largest gap between the LP best response and ours against the DCFR strategy "
         f"(must be <= {LP_BR_TOL:g}).",
         "- `dominated`: (infoset, action) pairs dominated by another action that also ends the player's "
-        "part in the hand. `audit_ratio`: the larger of the two players' reach-weighted bound divided by "
-        "that player's best-response gain, for the DCFR strategy (must be <= 1).",
+        "part in the hand (here always: folding a hand that can't lose). `mistake_rate`: how often the DCFR "
+        "strategy plays such an action at these spots, weighted by how often each spot comes up (larger "
+        "player). `audit_ratio`: the larger of the two players' reach-weighted bound divided by that "
+        "player's best-response gain (must be <= 1).",
         f"- `swap_diff`: largest change in exploitability, best responses or value after swapping boards A "
         f"and B, over the DCFR strategy and {cfg.get('random_profiles', 2)} random ones (must be <= {SWAP_TOL:g}).",
         f"- All {len(rows)} games pass every check: {all(r['ok'] for r in rows)}.",

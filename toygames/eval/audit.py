@@ -88,11 +88,13 @@ def audit(tree: Tree, sigma, br_value: tuple, game_value: float) -> dict:
         kinds = {}
         for d in mine:
             kinds[f"{d.action}<{d.better}"] = kinds.get(f"{d.action}<{d.better}", 0) + 1
+        reach = sum(d.reach for d in mine)
         out[f"p{p}"] = {
             "dominated": len(mine),
             "kinds": kinds,
-            # How often the dominated action is played where it matters (reached in >= 1 hand in 1,000).
-            "max_prob_reach_1e-3": max((d.prob for d in mine if d.reach >= 1e-3), default=0.0),
+            "reach": reach,  # chance per hand of standing at one of these spots
+            # How often the dominated action is played there, weighted by how often each spot comes up.
+            "mistake_rate": sum(d.reach * d.prob for d in mine) / reach if reach > 0 else 0.0,
             "bound_sum": bound,
             "bound_max": max((d.bound for d in mine), default=0.0),
             "br_gain": gains[p],
