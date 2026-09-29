@@ -1,0 +1,18 @@
+# One-minute end-to-end check of the certify experiment (N = 4 only).
+title: "Check B smoke test"
+experiment: certify
+seed: 0
+game:
+  name: board_leduc
+  num_boards: 2
+  streets: 2
+sweep:
+  num_ranks: [4]
+  deck_mode: [shared, independent, identical]
+solvers:
+  dcfr: {variant: dcfr, alpha: 1.5, beta: 0.0, gamma: 2.0, tol: 1.0e-5, max_iterations: 20000, log_every: 50}
+  cfr+: {variant: cfr+, iterations: 500, log_every: 100}
+  cfr: {variant: cfr, iterations: 500, log_every: 100}
+lp_max_ranks: 4
+lp_br_max_ranks: 4
+random_profiles: 2

@@ -13,6 +13,7 @@ realization plan. That's all CFR, best response and the LP need.
 """
 from __future__ import annotations
 
+import json
 import pickle
 import time
 from array import array
@@ -283,3 +284,73 @@ def strategy_from_table(tree: Tree, table: dict) -> list[np.ndarray]:
                 for j, a in enumerate(tree.actions[p][i]):
                     sigma[p][f + j] = table[key][a]
     return sigma
+
+
+# Saved strategies -----------------------------------------------------------------------
+# A profile is saved as {infoset key: action probabilities}, in a compressed .npz that
+# needs no tree to read: per player the keys, each infoset's action count, and one
+# action label and probability per sequence (infosets in order, actions in order).
+
+
+def save_strategy(path, tree: Tree, sigma, **info) -> None:
+    """Save the profile `sigma` of `tree`, plus `info` (solver, exploitability, ...)."""
+    arrays = {"info": np.array(json.dumps({"game": tree.name, **info}, default=str))}
+    for p in (0, 1):
+        arrays[f"keys{p}"] = np.array(tree.keys[p], dtype=str)
+        arrays[f"num_actions{p}"] = np.asarray(tree.num_actions[p], dtype=np.int64)
+        arrays[f"labels{p}"] = np.array([a for acts in tree.actions[p] for a in acts], dtype=str)
+        arrays[f"probs{p}"] = np.asarray(sigma[p][1:], dtype=np.float64)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        np.savez_compressed(f, **arrays)
+
+
+@dataclass
+class SavedStrategy:
+    info: dict
+    keys: list         # [p] -> infoset keys
+    num_actions: list  # [p] -> actions per infoset
+    labels: list       # [p] -> action label per sequence
+    probs: list        # [p] -> probability per sequence
+
+    def table(self) -> dict:
+        """{infoset key: {action: probability}} for both players."""
+        table = {}
+        for p in (0, 1):
+            ends = np.cumsum(self.num_actions[p])
+            for key, end, n in zip(self.keys[p], ends, self.num_actions[p]):
+                table[str(key)] = {str(a): float(q) for a, q in
+                                   zip(self.labels[p][end - n:end], self.probs[p][end - n:end])}
+        return table
+
+    def sigma(self, tree: Tree) -> list[np.ndarray]:
+        """The profile on `tree`, which must have exactly these infosets and actions."""
+        sigma = []
+        for p in (0, 1):
+            index = tree.infoset_index(p)
+            if len(self.keys[p]) != tree.n_infosets[p]:
+                raise ValueError(f"player {p}: {len(self.keys[p])} saved infosets, tree has {tree.n_infosets[p]}")
+            order = np.array([index[str(k)] for k in self.keys[p]], dtype=np.int64)
+            na = tree.num_actions[p][order]
+            if not np.array_equal(na, self.num_actions[p]):
+                raise ValueError(f"player {p}: action counts differ from the tree")
+            offsets = np.arange(len(self.probs[p])) - np.repeat(np.cumsum(na) - na, na)
+            seqs = np.repeat(tree.first_seq[p][order], na) + offsets
+            tree_labels = np.array([a for acts in tree.actions[p] for a in acts], dtype=str)
+            if not np.array_equal(tree_labels[seqs - 1], self.labels[p]):
+                raise ValueError(f"player {p}: action labels differ from the tree")
+            s = np.ones(tree.n_seqs[p])
+            s[seqs] = self.probs[p]
+            sigma.append(s)
+        return sigma
+
+
+def load_strategy(path) -> SavedStrategy:
+    with np.load(path) as z:
+        return SavedStrategy(
+            info=json.loads(str(z["info"])),
+            keys=[z[f"keys{p}"] for p in (0, 1)],
+            num_actions=[z[f"num_actions{p}"] for p in (0, 1)],
+            labels=[z[f"labels{p}"] for p in (0, 1)],
+            probs=[z[f"probs{p}"] for p in (0, 1)],
+        )

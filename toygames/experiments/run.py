@@ -8,8 +8,9 @@ to results/<config hash>/. A run whose result.json already exists at the current
 clean git hash is reused unless --force is given.
 
 Experiments:
-  solve  full-game DCFR (plus the LP for small games) for every game in the sweep
-  grid   the bucketing experiment (see grid.py)
+  solve    full-game DCFR (plus the LP for small games) for every game in the sweep
+  grid     the bucketing experiment (see grid.py)
+  certify  re-certify full-game equilibria with independent methods (see certify.py)
 """
 from __future__ import annotations
 
@@ -220,6 +221,10 @@ def main(argv=None):
         from toygames.experiments.grid import run_grid
 
         run_grid(cfg, out, args.workers, args.force, git)
+    elif cfg["experiment"] == "certify":
+        from toygames.experiments.certify import run_certify
+
+        run_certify(cfg, out, args.workers, args.force, git)
     else:
         raise ValueError(f"unknown experiment {cfg['experiment']!r}")
     (out / "done").write_text(time.strftime("%Y-%m-%d %H:%M:%S\n"))

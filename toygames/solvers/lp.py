@@ -14,7 +14,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.optimize import linprog
 
-from toygames.tree import Tree, behavioural_from_plan
+from toygames.tree import Tree, behavioural_from_plan, realization_plan
 
 HIGHS_OPTIONS = {"primal_feasibility_tolerance": 1e-10, "dual_feasibility_tolerance": 1e-10}
 
@@ -54,6 +54,28 @@ def solve_lp(tree: Tree, player: int = 0, options: dict | None = None):
         raise RuntimeError(f"LP for player {p} failed: {res.message}")
     x = np.maximum(res.x[:n_x], 0.0)
     return float(-res.fun), behavioural_from_plan(tree, p, x), x
+
+
+def best_response_lp(tree: Tree, player: int, sigma_opp: np.ndarray, options: dict | None = None):
+    """Best-response value of `player` against a fixed opponent, as a linear program:
+
+        maximize c^T x  subject to  E x = e,  x >= 0,   c = A_p x_opp,
+
+    the payoff of each of the player's sequences against the opponent's realization
+    plan. A cross-check on eval.best_response, which gets the same value by backward
+    induction. The costs are scaled to a largest entry of 1 first: HiGHS's tolerances
+    are absolute, and unscaled chance-weighted payoffs are tiny. Returns (value, plan)."""
+    p, o = player, 1 - player
+    A = payoff_matrix(tree)
+    x_o = realization_plan(tree, o, sigma_opp)
+    c = A @ x_o if p == 0 else -(A.T @ x_o)
+    scale = float(np.abs(c).max()) or 1.0
+    E, e = constraint_matrix(tree, p)
+    res = linprog(-c / scale, A_eq=E, b_eq=e, bounds=(0, None), method="highs",
+                  options={**HIGHS_OPTIONS, **(options or {})})
+    if res.status != 0:
+        raise RuntimeError(f"best-response LP for player {p} failed: {res.message}")
+    return float(-res.fun) * scale, res.x
 
 
 def solve_game(tree: Tree, options: dict | None = None):
