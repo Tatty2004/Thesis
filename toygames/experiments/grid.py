@@ -52,12 +52,12 @@ def features_for(gcfg: dict):
 
 
 def grid_one(job) -> dict:
-    run, force = job
-    cached = cached_result(run, force)
+    run, force, git = job
+    cached = cached_result(run, force, git)
     if cached is not None:
         return cached
     seed_everything(run["seed"])
-    run_dir = start_run(run)
+    run_dir = start_run(run, git)
     full = tree_for(run["game"])
     start = time.perf_counter()
     bucket_stats = {}
@@ -65,7 +65,7 @@ def grid_one(job) -> dict:
         tree, ag = full, None
     else:
         feats = features_for(run["game"])
-        bucketing = make_bucketing(feats, run["method"], run["k"], run["seed"])
+        bucketing = make_bucketing(feats, run["method"], run["k"], run["seed"], run.get("restarts", 1))
         ag = build_abstract_game(full, bucketing)
         tree = ag.tree
         for t in range(feats.num_streets):
@@ -76,11 +76,11 @@ def grid_one(job) -> dict:
     solver = CFR(tree, s["variant"], s["alpha"], s["beta"], s["gamma"])
     rows = solver.run(tol=s["tol"], max_iterations=s["max_iterations"], log_every=s["log_every"],
                       log_path=run_dir / "log.csv")
-    inside = rows[-1]
-    total = inside if ag is None else vars(exploitability(full, ag.lift(solver.average_strategy())))
+    inside = total = rows[-1]
     if ag is not None:
-        total = {"exploitability": total["exploitability"], "game_value": total["game_value"],
-                 "br_value_p0": total["br_value"][0], "br_value_p1": total["br_value"][1]}
+        rep = exploitability(full, ag.lift(solver.average_strategy()))
+        total = {"exploitability": rep.exploitability, "game_value": rep.game_value,
+                 "br_value_p0": rep.br_value[0], "br_value_p1": rep.br_value[1]}
     result = {
         "game": full.name, "num_ranks": run["game"]["num_ranks"], "deck_mode": run["game"]["deck_mode"],
         "method": run["method"], "k": run["k"], "seed": run["seed"],
@@ -95,32 +95,35 @@ def grid_one(job) -> dict:
     return finish_run(run_dir, result)
 
 
-def grid_jobs(cfg: dict, force: bool) -> list:
+def grid_jobs(cfg: dict, force: bool, git: dict) -> list:
     jobs = []
     combos = sorted(expand(cfg["games"]), key=lambda c: (c["num_ranks"], c["deck_mode"]))
     for combo in combos:
         gcfg = game_cfg(cfg["game"], combo)
         base = {"experiment": "grid", "game": gcfg, "solver": cfg["solver"]}
-        jobs.append(({**base, "method": "full", "k": None, "seed": cfg["seed"]}, force))
-        jobs.append(({**base, "method": "lossless", "k": None, "seed": cfg["seed"]}, force))
+        jobs.append(({**base, "method": "full", "k": None, "seed": cfg["seed"]}, force, git))
+        jobs.append(({**base, "method": "lossless", "k": None, "seed": cfg["seed"]}, force, git))
         for method in cfg["methods"]:
             for k in cfg["ks"]:
                 if method == "product" and int(np.sqrt(k)) ** 2 != k:
                     continue
                 for seed in cfg["seeds"]:
-                    jobs.append(({**base, "method": method, "k": k, "seed": seed}, force))
+                    run = {**base, "method": method, "k": k, "seed": seed}
+                    if "bucketing" in cfg:
+                        run["restarts"] = cfg["bucketing"]["restarts"]
+                    jobs.append((run, force, git))
     return jobs
 
 
-def run_grid(cfg: dict, out: Path, workers: int, force: bool) -> None:
-    jobs = grid_jobs(cfg, force)
+def run_grid(cfg: dict, out: Path, workers: int, force: bool, git: dict) -> None:
+    jobs = grid_jobs(cfg, force, git)
     for combo in expand(cfg["games"]):  # compile and featurize once, up front
         gcfg = game_cfg(cfg["game"], combo)
         tree_for(gcfg)
         features_for(gcfg)
     print(f"{len(jobs)} runs", flush=True)
     results = run_parallel(grid_one, jobs, workers)
-    for (run, _), res in zip(jobs, results):
+    for (run, _, _), res in zip(jobs, results):
         res["run"] = config_hash(run)
     write_outputs(cfg, results, out)
 
@@ -191,6 +194,19 @@ def write_outputs(cfg: dict, results: list[dict], out: Path) -> None:
         lines.append(f"- N={n} {deck}: full {full['total_error']:.6e} after {full['iterations']} its, lossless "
                      f"{loss['total_error']:.6e} after {loss['iterations']} its -> "
                      f"{'identical' if same else 'MISMATCH'}")
+    lines.append("")
+
+    # Invariants every run must satisfy, whatever the bucketing.
+    lines += ["## Sanity checks", ""]
+    for n, deck in games:
+        rs = [r for r in results if (r["num_ranks"], r["deck_mode"]) == (n, deck)]
+        lo = max(-r["full_br_value_p1"] for r in rs)  # every profile brackets the game value
+        hi = min(r["full_br_value_p0"] for r in rs)
+        lines.append(
+            f"- N={n} {deck}: {sum(r['converged'] for r in rs)}/{len(rs)} reached tol; "
+            f"total >= solver error in {sum(r['total_error'] >= r['solver_error'] - 1e-12 for r in rs)}/{len(rs)}; "
+            f"max |full-game value - bucketed value| {max(abs(r['full_value'] - r['abstract_value']) for r in rs):.1e}; "
+            f"game value in [{lo:+.6f}, {hi:+.6f}] (consistent: {lo <= hi + 1e-12})")
     lines.append("")
 
     # The questions: kmeans_2d vs avg_1d, emd_2d vs kmeans_2d, and shared vs independent.

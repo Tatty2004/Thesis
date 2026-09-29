@@ -89,6 +89,49 @@ def test_kmeans_recovers_separated_clusters():
     assert len(set(kmeans(X[:3], np.ones(3) / 3, 3, rng))) == 3
 
 
+def _sse(X, w, labels):
+    return sum((w[labels == c, None] * (X[labels == c] - np.average(X[labels == c], axis=0,
+                                                                   weights=w[labels == c])) ** 2).sum()
+               for c in np.unique(labels))
+
+
+def _optimal_sse(X, w, k):
+    """Exact k-means optimum by trying every partition (fine for a handful of points)."""
+    import itertools
+
+    best = np.inf
+    for labels in itertools.product(range(k), repeat=len(X)):
+        if labels[0] == 0 and len(set(labels)) == k:
+            best = min(best, _sse(X, w, np.array(labels)))
+    return best
+
+
+def test_restarts_escape_bad_local_optimum():
+    # A real street-1 public state (N = 5, independent). One k-means++ start can split
+    # off the outlier (SSE 0.0814); the optimum pairs the three weak hands (SSE 0.0558).
+    X = np.array([[0.1224, 0.8571], [0.2755, 0.1939], [0.4796, 0.3980], [0.9592, 0.5510], [0.7041, 0.7041]])
+    w = np.array([0.125, 0.25, 0.25, 0.125, 0.25])
+    single = [_sse(X, w, kmeans(X, w, 2, np.random.default_rng(s))) for s in range(20)]
+    assert max(single) > _optimal_sse(X, w, 2) + 1e-3  # some single starts stall
+    for s in range(20):
+        assert _sse(X, w, kmeans(X, w, 2, np.random.default_rng(s), restarts=20)) == \
+               pytest.approx(_optimal_sse(X, w, 2), abs=1e-12)
+
+
+@pytest.mark.parametrize("k", [2, 3])
+def test_restarts_reach_the_optimum_almost_always(k):
+    _, _, feats = setup("independent")
+    hit = total = 0
+    for t in range(2):
+        for key, hf in list(feats.streets[t].items())[::2]:
+            if len(np.unique(np.round(hf.points, 12), axis=0)) <= k:
+                continue
+            labels = kmeans(hf.points, hf.weights, k, np.random.default_rng(0), restarts=20)
+            total += 1
+            hit += _sse(hf.points, hf.weights, labels) <= _optimal_sse(hf.points, hf.weights, k) + 1e-12
+    assert hit / total >= 0.97
+
+
 def test_emd_basics():
     a = np.array([[0.0, 0.0], [1.0, 0.0]])
     assert emd(a, np.array([0.5, 0.5]), a, np.array([0.5, 0.5])) == pytest.approx(0.0)

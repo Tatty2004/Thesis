@@ -44,22 +44,25 @@ def config_hash(cfg: dict) -> str:
 
 
 def git_info() -> dict:
+    """HEAD, and whether the package code (toygames/, pyproject.toml) differs from it."""
     try:
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,
                               check=True).stdout.strip()
-        dirty = bool(subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT,
-                                    capture_output=True, text=True).stdout.strip())
+        dirty = bool(subprocess.run(["git", "status", "--porcelain", "--", "toygames", "pyproject.toml"],
+                                    cwd=ROOT, capture_output=True, text=True).stdout.strip())
     except (OSError, subprocess.CalledProcessError):
         head, dirty = "unknown", True
     return {"git_hash": head, "git_dirty": dirty}
 
 
-def start_run(cfg: dict) -> Path:
-    """Create results/<hash>/ holding the run's config, seed and git hash."""
+def start_run(cfg: dict, git: dict | None = None) -> Path:
+    """Create results/<hash>/ holding the run's config, seed and git hash. Pool workers get
+    `git` from the parent, read once when the code was loaded, so a commit made while a
+    grid runs can't relabel runs that are still executing the old code."""
     run_dir = RESULTS / config_hash(cfg)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=True))
-    meta = {"config_hash": config_hash(cfg), "seed": cfg.get("seed"), **git_info(),
+    meta = {"config_hash": config_hash(cfg), "seed": cfg.get("seed"), **(git or git_info()),
             "started": time.strftime("%Y-%m-%d %H:%M:%S"), "python": platform.python_version(),
             "numpy": np.__version__, "host": platform.node()}
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -72,14 +75,13 @@ def start_run(cfg: dict) -> Path:
 REUSE = {"any_commit": False}  # set by --reuse-any-commit
 
 
-def cached_result(cfg: dict, force: bool) -> dict | None:
+def cached_result(cfg: dict, force: bool, now: dict) -> dict | None:
     """The stored result of this run, if a clean commit produced it: the current commit
     by default, any commit with --reuse-any-commit (each result keeps its own git hash)."""
     run_dir = RESULTS / config_hash(cfg)
     if force or not (run_dir / "result.json").exists():
         return None
     meta = json.loads((run_dir / "meta.json").read_text())
-    now = git_info()
     if meta.get("git_dirty"):
         return None
     if not REUSE["any_commit"] and (now["git_dirty"] or meta.get("git_hash") != now["git_hash"]):
@@ -144,12 +146,12 @@ def markdown_table(rows: list[dict], cols: list[str], fmt: dict | None = None) -
 
 
 def solve_one(job) -> dict:
-    cfg, force = job
-    cached = cached_result(cfg, force)
+    cfg, force, git = job
+    cached = cached_result(cfg, force, git)
     if cached is not None:
         return cached
     seed_everything(cfg["seed"])
-    run_dir = start_run(cfg)
+    run_dir = start_run(cfg, git)
     tree = tree_for(cfg["game"])
     s = cfg["solver"]
     solver = CFR(tree, s["variant"], s.get("alpha", 1.5), s.get("beta", 0.0), s.get("gamma", 2.0))
@@ -171,18 +173,18 @@ def solve_one(job) -> dict:
     return finish_run(run_dir, result)
 
 
-def run_solve(cfg: dict, out: Path, workers: int, force: bool) -> None:
+def run_solve(cfg: dict, out: Path, workers: int, force: bool, git: dict) -> None:
     jobs = []
     for combo in expand(cfg.get("sweep", {})):
         gcfg = game_cfg(cfg["game"], combo)
         run = {"experiment": "solve", "seed": cfg["seed"], "game": gcfg, "solver": cfg["solver"],
                "lp": gcfg.get("num_ranks", 0) <= cfg.get("lp_max_ranks", 0)}
-        jobs.append((run, force))
-    for run, _ in jobs:  # compile once, up front, so workers only load the cache
+        jobs.append((run, force, git))
+    for run, _, _ in jobs:  # compile once, up front, so workers only load the cache
         tree_for(run["game"])
     results = run_parallel(solve_one, jobs, workers)
     rows = []
-    for (run, _), res in zip(jobs, results):
+    for (run, _, _), res in zip(jobs, results):
         rows.append({**{k: run["game"].get(k) for k in ("num_ranks", "deck_mode")}, **res,
                      "run": config_hash(run)})
     cols = ["num_ranks", "deck_mode", "infosets", "terminals", "iterations", "ms_per_iteration", "solve_seconds",
@@ -209,15 +211,15 @@ def main(argv=None):
     args = ap.parse_args(argv)
     REUSE["any_commit"] = args.reuse_any_commit
     cfg = yaml.safe_load(Path(args.config).read_text())
-    out = start_run(cfg)
-    print(f"results/{out.name}/  ({git_info()['git_hash'][:10]}{' dirty' if git_info()['git_dirty'] else ''})",
-          flush=True)
+    git = git_info()
+    out = start_run(cfg, git)
+    print(f"results/{out.name}/  ({git['git_hash'][:10]}{' dirty' if git['git_dirty'] else ''})", flush=True)
     if cfg["experiment"] == "solve":
-        run_solve(cfg, out, args.workers, args.force)
+        run_solve(cfg, out, args.workers, args.force, git)
     elif cfg["experiment"] == "grid":
         from toygames.experiments.grid import run_grid
 
-        run_grid(cfg, out, args.workers, args.force)
+        run_grid(cfg, out, args.workers, args.force, git)
     else:
         raise ValueError(f"unknown experiment {cfg['experiment']!r}")
     (out / "done").write_text(time.strftime("%Y-%m-%d %H:%M:%S\n"))

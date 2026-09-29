@@ -11,7 +11,10 @@ Methods, compared at the same bucket count k:
              histograms. Last street: kmeans_2d.
   lossless   one bucket per hand.
 
-Every k-means weights hands by probability and starts from k-means++. Each public
+Every k-means weights hands by probability and keeps the best of `restarts` runs,
+each seeded with k-means++. "Best" means the lowest weighted sum of squared
+distances to the centers, with EMD as the distance for emd_2d. A single start often
+stalls in a poor local optimum on these few points, so restarts matter. Each public
 state gets its own random stream derived from `seed`, shared by both players, so a
 public state has one bucketing. A public state with at most k distinct features
 gives each its own bucket. Buckets are numbered weakest first (by the center's mean
@@ -38,6 +41,7 @@ class Bucketing:
     seed: int
     board_len: list
     table: list  # [t] -> {(player, board): {hand: bucket}}
+    restarts: int = 1
 
     def bucket(self, street: int, player: int, board: tuple, hand) -> int:
         return self.table[street][(player, board[: self.board_len[street]])][hand]
@@ -53,7 +57,7 @@ def public_state_rng(seed: int, street: int, board: tuple) -> np.random.Generato
     return np.random.default_rng([seed, int.from_bytes(digest[:8], "little")])
 
 
-def make_bucketing(features: Features, method: str, k: int | None, seed: int) -> Bucketing:
+def make_bucketing(features: Features, method: str, k: int | None, seed: int, restarts: int = 20) -> Bucketing:
     if method not in METHODS:
         raise ValueError(f"unknown method {method!r}")
     if method == "product" and math.isqrt(k) ** 2 != k:
@@ -64,25 +68,26 @@ def make_bucketing(features: Features, method: str, k: int | None, seed: int) ->
         tab = {}
         for (player, board), hf in features.streets[t].items():
             rng = public_state_rng(seed, t, board)
-            tab[(player, board)] = dict(zip(hf.hands, (int(b) for b in _labels(hf, method, k, rng, last))))
+            labels = _labels(hf, method, k, rng, last, restarts)
+            tab[(player, board)] = dict(zip(hf.hands, (int(b) for b in labels)))
         table.append(tab)
-    return Bucketing(method, k, seed, features.board_len, table)
+    return Bucketing(method, k, seed, features.board_len, table, restarts)
 
 
-def _labels(hf: HandFeatures, method: str, k: int, rng, last: bool) -> np.ndarray:
+def _labels(hf: HandFeatures, method: str, k: int, rng, last: bool, restarts: int) -> np.ndarray:
     w = hf.weights
     if method == "lossless":
         return np.arange(len(hf.hands))
     if method == "avg_1d":
-        return kmeans(hf.points.mean(axis=1, keepdims=True), w, k, rng)
+        return kmeans(hf.points.mean(axis=1, keepdims=True), w, k, rng, restarts)
     if method == "kmeans_2d" or (method == "emd_2d" and last):
-        return kmeans(hf.points, w, k, rng)
+        return kmeans(hf.points, w, k, rng, restarts)
     if method == "emd_2d":
-        return emd_kmeans(hf.atoms, hf.atom_weights, w, k, rng)
+        return emd_kmeans(hf.atoms, hf.atom_weights, w, k, rng, restarts)
     m = math.isqrt(k)
     labels = np.zeros(len(hf.hands), dtype=np.int64)
     for j in range(hf.points.shape[1]):
-        labels = labels * m + kmeans(hf.points[:, j:j + 1], w, m, rng)
+        labels = labels * m + kmeans(hf.points[:, j:j + 1], w, m, rng, restarts)
     return labels
 
 
@@ -110,14 +115,26 @@ def _fill_empty(labels: np.ndarray, cost: np.ndarray, k: int) -> np.ndarray:
     return labels
 
 
-def kmeans(X: np.ndarray, w: np.ndarray, k: int, rng, max_iter: int = 300) -> np.ndarray:
-    """Weighted Lloyd's k-means with k-means++ seeding; returns a label per row of X."""
+def kmeans(X: np.ndarray, w: np.ndarray, k: int, rng, restarts: int = 1, max_iter: int = 300) -> np.ndarray:
+    """Weighted k-means: the best of `restarts` runs of k-means++ seeding then Lloyd's
+    iterations. Returns a label per row of X."""
     uniq, first, inv = np.unique(np.round(X, 12), axis=0, return_index=True, return_inverse=True)
     inv = inv.ravel()
     P, W = X[first], np.bincount(inv, weights=w, minlength=len(uniq))
     if len(P) <= k:
         return _canonical(inv, P.mean(axis=1))
-    # k-means++ on the distinct points, weighted by probability.
+    best = None
+    for _ in range(restarts):
+        labels, C = _lloyd(P, W, k, rng, max_iter)
+        cost = float(W @ ((P - C[labels]) ** 2).sum(1))
+        if best is None or cost < best[0] - 1e-15:
+            best = (cost, labels, C)
+    _, labels, C = best
+    return _canonical(labels, C.mean(axis=1))[inv]
+
+
+def _lloyd(P: np.ndarray, W: np.ndarray, k: int, rng, max_iter: int):
+    """One k-means++ seeding (weighted by probability) and Lloyd's iterations."""
     chosen = [rng.choice(len(P), p=W / W.sum())]
     d2 = ((P - P[chosen[0]]) ** 2).sum(1)
     for _ in range(1, k):
@@ -135,7 +152,7 @@ def kmeans(X: np.ndarray, w: np.ndarray, k: int, rng, max_iter: int = 300) -> np
             break
         labels = new
         C = np.array([np.average(P[labels == c], axis=0, weights=W[labels == c]) for c in range(k)])
-    return _canonical(labels, C.mean(axis=1))[inv]
+    return labels, C
 
 
 # Earth mover's distance k-means ------------------------------------------------------
@@ -153,8 +170,10 @@ def _mixture(members, weights):
     return _merge_atoms(pts, ws / ws.sum())
 
 
-def emd_kmeans(atoms: list, atom_w: list, w: np.ndarray, k: int, rng, max_iter: int = 100) -> np.ndarray:
-    """k-means over histograms: assign by EMD, recenter as the weighted mixture of members."""
+def emd_kmeans(atoms: list, atom_w: list, w: np.ndarray, k: int, rng, restarts: int = 1,
+               max_iter: int = 100) -> np.ndarray:
+    """k-means over histograms: assign by EMD, recenter as the weighted mixture of the
+    members. Keeps the best of `restarts` runs by weighted sum of squared EMD to the centers."""
     n = len(atoms)
     D = np.zeros((n, n))
     for i in range(n):
@@ -172,20 +191,33 @@ def emd_kmeans(atoms: list, atom_w: list, w: np.ndarray, k: int, rng, max_iter: 
     if len(reps) <= k:
         return _canonical(group, means[reps])
     Dr = D[np.ix_(reps, reps)]
-    chosen = [rng.choice(len(reps), p=W / W.sum())]
+    hists = [(atoms[r], atom_w[r]) for r in reps]
+    best = None
+    for _ in range(restarts):
+        labels, centers = _emd_lloyd(hists, W, Dr, k, rng, max_iter)
+        cost = sum(W[i] * emd(*hists[i], *centers[labels[i]]) ** 2 for i in range(len(reps)))
+        if best is None or cost < best[0] - 1e-15:
+            best = (cost, labels, centers)
+    _, labels, centers = best
+    score = np.array([cw @ ca for ca, cw in centers]).mean(axis=1)
+    return _canonical(labels, score)[group]
+
+
+def _emd_lloyd(hists: list, W: np.ndarray, Dr: np.ndarray, k: int, rng, max_iter: int):
+    """One k-means++ seeding under EMD and the assign / re-mix iterations."""
+    chosen = [rng.choice(len(hists), p=W / W.sum())]
     d = Dr[chosen[0]].copy()
     for _ in range(1, k):
         prob = W * d ** 2
-        i = rng.choice(len(reps), p=prob / prob.sum())
+        i = rng.choice(len(hists), p=prob / prob.sum())
         chosen.append(i)
         d = np.minimum(d, Dr[i])
-    hists = [(atoms[r], atom_w[r]) for r in reps]
     centers = [hists[c] for c in chosen]
     labels, seen = None, set()
     for _ in range(max_iter):
         dist = np.array([[emd(a, aw, ca, cw) for ca, cw in centers] for a, aw in hists])
         new = dist.argmin(1)
-        new = _fill_empty(new, W * dist[np.arange(len(reps)), new] ** 2, k)
+        new = _fill_empty(new, W * dist[np.arange(len(hists)), new] ** 2, k)
         if labels is not None and np.array_equal(new, labels):
             break
         if tuple(new) in seen:  # EMD k-means is not guaranteed to settle; stop at a repeat
@@ -193,5 +225,4 @@ def emd_kmeans(atoms: list, atom_w: list, w: np.ndarray, k: int, rng, max_iter: 
         seen.add(tuple(new))
         labels = new
         centers = [_mixture([hists[i] for i in np.flatnonzero(labels == c)], W[labels == c]) for c in range(k)]
-    score = np.array([cw @ ca for ca, cw in centers]).mean(axis=1)
-    return _canonical(labels, score)[group]
+    return labels, centers

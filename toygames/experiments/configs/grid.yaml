@@ -15,6 +15,8 @@ games:
 methods: [avg_1d, product, kmeans_2d, emd_2d]
 ks: [2, 3, 4, 5]
 seeds: [0, 1, 2, 3, 4]
+bucketing:
+  restarts: 20   # k-means++ restarts per public state; the best (lowest cost) is kept
 solver:
   variant: dcfr
   alpha: 1.5

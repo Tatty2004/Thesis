@@ -12,6 +12,8 @@ games:
 methods: [avg_1d, product, kmeans_2d, emd_2d]
 ks: [2, 4]
 seeds: [0, 1]
+bucketing:
+  restarts: 20
 solver:
   variant: dcfr
   alpha: 1.5
