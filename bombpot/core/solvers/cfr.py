@@ -22,7 +22,56 @@ def dcfr_discount(regret: np.ndarray, t: int, alpha: float, beta: float) -> np.n
     return regret
 
 
-class CFR:
+class IterativeSolver:
+    """The shared driver: subclasses provide iteration(), log_row(), t and solve_seconds."""
+
+    def run(self, iterations: int | None = None, tol: float | None = None, max_iterations: int = 100_000,
+            log_every: int = 10, log_path=None, verbose: bool = False) -> list[dict]:
+        """Iterate to `iterations`, or until the average strategy's exploitability is <= tol.
+
+        Every `log_every` iterations (and at the end) it logs the iteration, wall time,
+        exploitability, each player's best-response value and the game value, all
+        for the average strategy. wall_time is seconds spent iterating, so the
+        logging itself isn't counted. Rows go to `log_path` as CSV when given.
+        Returns the rows.
+        """
+        if iterations is None and tol is None:
+            raise ValueError("give iterations, tol, or both")
+        target = iterations if iterations is not None else max_iterations
+        rows = []
+        f = writer = None
+        if log_path is not None:
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+            new = not Path(log_path).exists()
+            f = open(log_path, "a", newline="")
+            writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+            if new:
+                writer.writeheader()
+        try:
+            while self.t < target:
+                self.iteration()
+                if self.t % log_every and self.t != target:
+                    continue
+                row = self.log_row()
+                rows.append(row)
+                if writer is not None:
+                    writer.writerow(row)
+                    f.flush()
+                if verbose:
+                    print(f"  it {row['iteration']:>6}  {row['wall_time']:8.2f}s  "
+                          f"expl {row['exploitability']:.3e}  value {row['game_value']:+.6f}", flush=True)
+                if tol is not None and row["exploitability"] <= tol:
+                    break
+        finally:
+            if f is not None:
+                f.close()
+        return rows
+
+    def log_row(self) -> dict:
+        raise NotImplementedError
+
+
+class CFR(IterativeSolver):
     """Counterfactual regret minimisation with alternating updates.
 
     variant "cfr":  regret matching, uniform average
@@ -105,50 +154,6 @@ class CFR:
         elif self.variant == "dcfr":
             dcfr_discount(regret, t, self.alpha, self.beta)
         self.sigma[p] = normalize(self.tree, p, np.maximum(regret, 0.0))
-
-    # Driver -----------------------------------------------------------------------
-
-    def run(self, iterations: int | None = None, tol: float | None = None, max_iterations: int = 100_000,
-            log_every: int = 10, log_path=None, verbose: bool = False) -> list[dict]:
-        """Iterate to `iterations`, or until the average strategy's exploitability is <= tol.
-
-        Every `log_every` iterations (and at the end) it logs the iteration, wall time,
-        exploitability, each player's best-response value and the game value, all
-        for the average strategy. wall_time is seconds spent iterating, so the
-        logging itself isn't counted. Rows go to `log_path` as CSV when given.
-        Returns the rows.
-        """
-        if iterations is None and tol is None:
-            raise ValueError("give iterations, tol, or both")
-        target = iterations if iterations is not None else max_iterations
-        rows = []
-        f = writer = None
-        if log_path is not None:
-            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-            new = not Path(log_path).exists()
-            f = open(log_path, "a", newline="")
-            writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
-            if new:
-                writer.writeheader()
-        try:
-            while self.t < target:
-                self.iteration()
-                if self.t % log_every and self.t != target:
-                    continue
-                row = self.log_row()
-                rows.append(row)
-                if writer is not None:
-                    writer.writerow(row)
-                    f.flush()
-                if verbose:
-                    print(f"  it {row['iteration']:>6}  {row['wall_time']:8.2f}s  "
-                          f"expl {row['exploitability']:.3e}  value {row['game_value']:+.6f}", flush=True)
-                if tol is not None and row["exploitability"] <= tol:
-                    break
-        finally:
-            if f is not None:
-                f.close()
-        return rows
 
     def log_row(self) -> dict:
         rep = exploitability(self.tree, self.average_strategy())

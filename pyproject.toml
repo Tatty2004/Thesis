@@ -7,7 +7,7 @@ name = "bombpot"
 version = "0.1.0"
 description = "GTO solving for heads-up double-board bomb pots: toy games, Hold'em, PLO"
 requires-python = ">=3.11"
-dependencies = ["numpy", "scipy", "POT", "pyyaml", "matplotlib"]
+dependencies = ["numpy", "scipy", "numba", "POT", "pyyaml", "matplotlib"]
 
 [project.optional-dependencies]
 test = ["pytest", "open_spiel"]

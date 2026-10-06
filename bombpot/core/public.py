@@ -187,12 +187,18 @@ def build_public_tree(game) -> PublicTree:
         S[last.index[b], hidx[h0], hidx[h1]] += q * float(np.mean(game.showdown(b, h0, h1)))
     last.S = S
 
-    templates = [_template(game, t) for t in range(T)]
+    return PublicTree(game.name, hands, streets, *betting(game))
+
+
+def betting(game) -> tuple[list, list]:
+    """Each street's betting template, and the chips each player has in at the start of each
+    street for every entering line."""
+    templates = [_template(game, t) for t in range(game.num_streets)]
     contrib = [np.array([_street_start(game, 0).contrib[0]], dtype=float)]
-    for t in range(T - 1):
+    for t in range(game.num_streets - 1):
         extra = np.array([e for _, e in templates[t].closes])
         contrib.append((contrib[t][:, None] + extra[None, :]).ravel())
-    return PublicTree(game.name, hands, streets, templates, contrib)
+    return templates, contrib
 
 
 # Coordinates of the compiled tree's infosets -----------------------------------------------
