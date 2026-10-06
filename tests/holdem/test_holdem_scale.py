@@ -1,5 +1,10 @@
-"""R4: the range solver on real-sized Hold'em, checked by brute force and by symmetry.
+"""R4: fixed-flop Hold'em on the range solver, checked by the LP, brute force and symmetry.
 
+- Small fixed-flop games go through the same path as the real deck (holdem_public_tree,
+  card-removal streets, the range solver) and are also solved exactly by the
+  sequence-form LP on the compiled game tree. The LP's equilibrium must grade as
+  unexploitable on the card-removal path, DCFR on that path must converge to the LP
+  value, and the tree solver must grade DCFR's strategy exactly as the range solver does.
 - On the 52-card deck, one turn deal's values (both players, every hand, every entering
   line) are recomputed by brute force: every pair of hands, every betting path of the
   street, payoffs from the hand evaluator. Nothing is shared with the solver's sweeps.
@@ -9,10 +14,46 @@
 import numpy as np
 import pytest
 
+from bombpot.core.eval.exploitability import exploitability
+from bombpot.core.public import from_tree_sigma, to_tree_sigma
+from bombpot.core.solvers.lp import solve_game
 from bombpot.core.solvers.range_cfr import RangeCFR
+from bombpot.core.tree import compile_game
 from bombpot.holdem import Holdem
 from bombpot.holdem.cards import SUIT_CHARS
 from bombpot.holdem.public import holdem_public_tree
+
+
+FIXED_FLOPS = [
+    pytest.param(dict(num_ranks=4, num_suits=3, board_cards=(3, 1), flops=("2c3c4d", "5c2d3d")), id="4x3-3+1"),
+    pytest.param(dict(num_ranks=6, num_suits=2, board_cards=(2, 1), flops=("2c7d", "3c3d")), id="6x2-2+1",
+                 marks=pytest.mark.slow),  # five-card hands: straights and flushes; the LP takes ~90 s
+]
+
+
+@pytest.mark.parametrize("kw", FIXED_FLOPS)
+def test_fixed_flop_games_match_the_lp(kw):
+    game = Holdem(**kw)
+    tree = compile_game(game)
+    (v, v1), sigma_lp = solve_game(tree)
+    assert v == pytest.approx(v1, abs=1e-6)
+    pt = holdem_public_tree(game)
+    solver = RangeCFR(pt)
+    # The LP's equilibrium, graded on the card-removal path: unexploitable and worth v.
+    lp = solver.exploitability(from_tree_sigma(pt, tree, sigma_lp))
+    assert lp["exploitability"] < 1e-7
+    assert lp["game_value"] == pytest.approx(v, abs=1e-8)
+    # DCFR on the card-removal path converges to it ...
+    solver.run(iterations=2000, log_every=2000)
+    avg = solver.average_strategy()
+    ours = solver.exploitability(avg)
+    assert ours["exploitability"] < 1e-4
+    assert -ours["br_value_p1"] - 1e-9 <= v <= ours["br_value_p0"] + 1e-9
+    # ... and the tree solver grades that strategy exactly as the range solver does.
+    ref = exploitability(tree, to_tree_sigma(pt, tree, solver.hand_sigma(avg)))
+    assert ours["br_value_p0"] == pytest.approx(ref.br_value[0], abs=1e-12)
+    assert ours["br_value_p1"] == pytest.approx(ref.br_value[1], abs=1e-12)
+    assert ours["game_value"] == pytest.approx(ref.game_value, abs=1e-12)
 
 
 def random_sigma(pt, seed):
