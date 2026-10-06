@@ -33,7 +33,7 @@ HOLE_CARDS = 2
 class Holdem(LimitPoker):
 
     def __init__(self, num_ranks: int = 13, num_suits: int = 4, board_cards=(3, 1), num_boards: int = 2,
-                 deck_mode: str = "shared", flops=None, ante: float = 1.0, bet_sizes=(2.0, 4.0), max_raises=2):
+                 deck_mode: str = "shared", flops=None, ante: float = 1.0, bet_sizes=(2.0, 4.0, 4.0), max_raises=2):
         if num_boards not in (1, 2):
             raise ValueError("num_boards must be 1 or 2")
         if deck_mode not in DECK_MODES:

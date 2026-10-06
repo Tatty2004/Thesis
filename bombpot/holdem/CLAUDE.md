@@ -40,7 +40,7 @@ Still **DCFR** (alpha = 1.5, beta = 0, gamma = 2), with the same math organized 
 | `num_boards` | 1, 2 | 2 |
 | `deck_mode` | `shared`, `identical` | `shared` |
 | `flops` | each board's street-1 cards, fixed instead of dealt | none |
-| `ante`, `bet_sizes`, `max_raises` | as in Board-Leduc | 1, `[2, 4]`, 2 |
+| `ante`, `bet_sizes`, `max_raises` | limit betting | 1, `[2, 4, 4]`, 2 (a bet and one raise per street) |
 
 - **Flow:** ante. Two private cards each, player 0 first, from one deck. On each street, `board_cards[t]` cards go to each board (A, then B), then a limit betting round. Then showdown. There is no betting before the first board cards.
 - **Hand on a board:** the best five-card hand from your two cards plus that board's cards (all of them when there are fewer than five). Standard ranking: straight flush, quads, full house, flush, straight, trips, two pair, pair, high card, with kickers. The ace plays low only in A-2-3-4-5, so the wheel needs the full deck.
@@ -141,6 +141,6 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
   - Not yet run on the real deck: fitting buckets for all 2,070 turn deals, and a real-deck sampled solve.
 
 ## Open decisions
-1. **Bet sizes for the real game.** Still undecided. The R4 runs used ante 1, bets [2, 4]; the three-street tests use [2, 4, 4] (small bet on the flop, big bet after). Provisional.
+1. ~~Bet sizes for the real game.~~ **Decided 2026-10-06:** limit betting with ante 1, bets [2, 4, 4] (pot-sized on the flop, doubled on turn and river) and at most a bet and one raise per street. This is now `Holdem`'s default; two-street games keep [2, 4], so the R4 run stands. Limit keeps measured exploitability down to card bucketing alone; pot-limit menus wait for PLO.
 2. **The river abstraction:** equity buckets per turn deal (imperfect recall, the usual choice in poker solvers). Built and tested, but it shapes what the thesis can claim. Needs sign-off.
 3. **Where the layer ends:** R4, or R5 as well. A real-deck R5 solve and its exact evaluation take many hours (see R5).
