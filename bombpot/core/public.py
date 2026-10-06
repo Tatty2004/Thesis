@@ -69,6 +69,10 @@ class Street:
         """(D, H): whether the player can hold each hand at each deal."""
         raise NotImplementedError
 
+    @property
+    def num_deals(self) -> int:
+        return len(self.deals)
+
 
 class DenseStreet(Street):
     """W and S as dense (D, H, H) arrays: exact and simple, for small games."""
@@ -109,7 +113,7 @@ class PublicTree:
         return len(self.contrib[t])
 
     def shape(self, t: int) -> tuple:
-        return (len(self.streets[t].deals), self.num_lines(t), len(self.hands))
+        return (self.streets[t].num_deals, self.num_lines(t), len(self.hands))
 
 
 def _street_start(game, t: int):

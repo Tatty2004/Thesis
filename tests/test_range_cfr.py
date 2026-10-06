@@ -167,3 +167,28 @@ def test_bucketed_lockstep_and_total_error(name, method, k):
     ref = exploitability(full, ag.lift(avg))
     assert ours["exploitability"] == pytest.approx(ref.exploitability, abs=1e-12)
     assert ours["game_value"] == pytest.approx(ref.game_value, abs=1e-12)
+
+
+@pytest.mark.slow
+def test_three_streets_match_the_tree_solver():
+    # The full-width reference for the river (tests/holdem/test_holdem_river.py): one
+    # board, a card on each of three streets, 2.4 million terminals.
+    game = Holdem(num_ranks=4, num_suits=2, board_cards=(1, 1, 1), num_boards=1, bet_sizes=(2, 4, 4))
+    tree, pt = compile_game(game), build_public_tree(game)
+    a, b = CFR(tree), RangeCFR(pt)
+    co = [tree_coordinates(pt, tree, p) for p in (0, 1)]
+    for _ in range(4):
+        for p in (0, 1):
+            b.sigma = from_tree_sigma(pt, tree, a.sigma)
+            _, regrets = b.instant_regrets(p)
+            ra = a._instant_regret(p)
+            f, m = tree.first_seq[p], tree.num_actions[p]
+            for n, (t, d, l, k, i) in enumerate(co[p]):
+                assert np.abs(ra[f[n]:f[n] + m[n]] - regrets[t][k][d, l, i]).max() < 1e-12
+        a.iteration()
+    for sigma in [a.average_strategy(), random_profile(tree, 5)]:
+        ours = RangeCFR(pt).exploitability(from_tree_sigma(pt, tree, sigma))
+        ref = exploitability(tree, sigma)
+        assert ours["br_value_p0"] == pytest.approx(ref.br_value[0], abs=1e-12)
+        assert ours["br_value_p1"] == pytest.approx(ref.br_value[1], abs=1e-12)
+        assert ours["game_value"] == pytest.approx(ref.game_value, abs=1e-12)

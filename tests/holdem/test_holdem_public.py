@@ -125,3 +125,31 @@ def test_real_deck_sums_match_brute_force(real):
             assert fold[i] == pytest.approx(k * f, rel=1e-12, abs=1e-18)
             assert share0[i] == pytest.approx(k * s0, rel=1e-12, abs=1e-18)
             assert share1[i] == pytest.approx(k * s1, rel=1e-12, abs=1e-18)
+
+
+# The river on demand ------------------------------------------------------------------------
+
+
+def test_lazy_river_equals_the_built_river():
+    from bombpot.holdem.public import HoldemRiver
+
+    game = Holdem(num_ranks=6, num_suits=3, board_cards=(3, 1, 1), flops=("2c3c4d", "5c6d4c"), bet_sizes=(2, 4, 4))
+    full = holdem_public_tree(game)
+    river = HoldemRiver(game, holdem_public_tree(game, upto=2))
+    parents, children = river.all_children(np.arange(full.streets[1].num_deals))
+    lazy = river.street(parents, children)
+    built = full.streets[2]
+    assert lazy.num_deals == built.num_deals == full.streets[1].num_deals * river.num_children
+    np.testing.assert_array_equal(lazy.parent, built.parent)
+    np.testing.assert_allclose(lazy.kappa, built.kappa, rtol=1e-14)
+    np.testing.assert_array_equal(lazy.valid, built.valid)
+    cards = river.river_cards(parents, children)
+    np.testing.assert_array_equal(cards, np.array(built.deals)[:, -2:])
+    reach = np.random.default_rng(0).random((built.num_deals, 2, len(full.hands)))
+    for p in (0, 1):
+        np.testing.assert_allclose(lazy.share(reach, p), built.share(reach, p), rtol=0, atol=1e-15)
+    # A sample is a reweighted subset of the same deals.
+    pick = np.array([5, 17, 17, 400])
+    sample = river.street(parents[pick], children[pick], scale=3.0)
+    np.testing.assert_allclose(sample.fold(reach[pick], 0), 3.0 * built.subset(pick).fold(reach[pick], 0),
+                               rtol=1e-13, atol=0)

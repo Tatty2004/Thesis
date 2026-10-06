@@ -18,15 +18,16 @@ from __future__ import annotations
 import time
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
+from bombpot.core.jit import kernel
 from bombpot.core.public import PublicTree
 from bombpot.core.solvers.cfr import IterativeSolver
 
 VARIANTS = {"cfr": 0, "cfr+": 1, "dcfr": 2}
 
 
-@njit(parallel=True, cache=True)
+@kernel
 def _expectation(sig, cv, value, regret):
     """value[n] = sum_a sig[n, a] cv[a, n] and regret[n, a] = cv[a, n] - value[n]."""
     N, A = sig.shape
@@ -39,7 +40,7 @@ def _expectation(sig, cv, value, regret):
             regret[n, a] = cv[a, n] - v
 
 
-@njit(parallel=True, cache=True)
+@kernel
 def _update(regret, instant, sigma, cum, own, weight, pos, neg, variant):
     """One node's update for its player, rows = infosets: add the strategy just played to
     the average (weighted by own reach), add the instant regret, apply CFR+'s floor or
@@ -67,6 +68,114 @@ def _segment_sum(values: np.ndarray, parent: np.ndarray, n: int) -> np.ndarray:
     out = np.zeros((n,) + values.shape[1:])
     np.add.at(out, parent, values)
     return out
+
+
+# Passes over a public tree ----------------------------------------------------------------
+# hsig[t][k] is the per-hand strategy at street t's template node k, shaped (D, L, H, A).
+
+
+def street_reach(tp, hsig_t, root):
+    """Forward through one street from its root reach (reach0, reach1): the reach at each
+    decision node, and after each line that closes the street."""
+    nodes = [None] * tp.num_nodes
+    nodes[0] = root
+    closing = [None] * tp.num_closes
+    for k in range(tp.num_nodes):
+        r = nodes[k]
+        q = tp.players[k]
+        for a, child in enumerate(tp.children[k]):
+            c = list(r)
+            c[q] = r[q] * hsig_t[k][..., a]
+            if child[0] == "node":
+                nodes[child[1]] = tuple(c)
+            elif child[0] == "close":
+                closing[child[1]] = tuple(c)
+    return nodes, closing
+
+
+def next_root(closing, parent: np.ndarray) -> tuple:
+    """Reach at the next street's root deals: each deal takes its parent's reach after every
+    closing line, so its lines are (previous lines x closing lines)."""
+    D, H = len(parent), closing[0][0].shape[-1]
+    return tuple(np.stack([c[p][parent] for c in closing], axis=2).reshape(D, -1, H) for p in (0, 1))
+
+
+def forward(pt: PublicTree, hsig) -> list:
+    """Both players' reach at every decision node: reach[t][k] = (reach0, reach1)."""
+    D0, _, H = pt.shape(0)
+    root = (np.ones((D0, 1, H)), np.ones((D0, 1, H)))
+    out = []
+    for t, tp in enumerate(pt.templates[:pt.num_streets]):
+        nodes, closing = street_reach(tp, hsig[t], root)
+        out.append(nodes)
+        if t + 1 < pt.num_streets:
+            root = next_root(closing, pt.streets[t + 1].parent)
+    return out
+
+
+def close_values(root_values: np.ndarray, parent: np.ndarray, n_parents: int, n_closes: int) -> np.ndarray:
+    """The next street's root values summed into their parent deals, per closing line:
+    (D_parent, L, closes, H)."""
+    D, _, H = root_values.shape
+    return _segment_sum(root_values.reshape(D, -1, n_closes, H), parent, n_parents)
+
+
+def street_values(tp, st, contrib, hsig_t, reach_t, p: int, mode: str, last: bool, agg=None):
+    """Player p's values at each node of one street (bottom-up), and instant regrets at p's
+    nodes in mode "cfr". `agg` holds the closing lines' values when the street isn't last."""
+    o = 1 - p
+    sign = 1.0 if p == 0 else -1.0
+    contrib = contrib[None, :, None]
+    V = [None] * tp.num_nodes
+    R = [None] * tp.num_nodes
+    for k in range(tp.num_nodes - 1, -1, -1):
+        q = tp.players[k]
+        rk = reach_t[k]
+        cv = np.empty((len(tp.actions[k]),) + rk[o].shape)
+        for a, child in enumerate(tp.children[k]):
+            ro = rk[o] * hsig_t[k][..., a] if q == o else rk[o]
+            if child[0] == "node":
+                v = V[child[1]]
+            elif child[0] == "fold":
+                _, folder, extra = child
+                lost = contrib + extra
+                u0 = -lost if folder == 0 else lost
+                v = sign * u0 * st.fold(ro, p)
+            elif last:  # showdown: player 0 wins pot x share - chips; player 1 the negative
+                chips = contrib + tp.closes[child[1]][1]
+                v = sign * chips * (2 * st.share(ro, p) - st.fold(ro, p))
+            else:
+                v = agg[:, :, child[1], :]
+            cv[a] = v
+        if q != p:
+            V[k] = cv.sum(0)
+        elif mode == "br":
+            V[k] = cv.max(0)
+        else:
+            A = cv.shape[0]
+            V[k] = np.empty(cv.shape[1:])
+            R[k] = np.empty(cv.shape[1:] + (A,))
+            _expectation(cv.size, np.ascontiguousarray(hsig_t[k]).reshape(-1, A), cv.reshape(A, -1),
+                         V[k].reshape(-1), R[k].reshape(-1, A))
+    return V, R
+
+
+def backward(pt: PublicTree, hsig, reach, p: int, mode: str = "cfr"):
+    """Player p's counterfactual value of each hand at every decision node, bottom-up.
+
+    mode "cfr": p plays hsig; returns (values, regrets at p's nodes).
+    mode "br":  p best-responds; returns (values, None for every node).
+    """
+    T = pt.num_streets
+    all_values, all_regrets = [None] * T, [None] * T
+    agg = None
+    for t in range(T - 1, -1, -1):
+        tp, st = pt.templates[t], pt.streets[t]
+        V, R = street_values(tp, st, pt.contrib[t], hsig[t], reach[t], p, mode, t == len(pt.templates) - 1, agg)
+        all_values[t], all_regrets[t] = V, R
+        if t > 0:
+            agg = close_values(V[0], st.parent, pt.streets[t - 1].num_deals, pt.templates[t - 1].num_closes)
+    return all_values, all_regrets
 
 
 class RangeCFR(IterativeSolver):
@@ -141,87 +250,10 @@ class RangeCFR(IterativeSolver):
     # Passes -------------------------------------------------------------------------
 
     def reach(self, hsig) -> list:
-        """Both players' reach at every decision node: reach[t][k] = (reach0, reach1)."""
-        pt = self.pt
-        out = []
-        D0, _, H = pt.shape(0)
-        root = (np.ones((D0, 1, H)), np.ones((D0, 1, H)))
-        for t, tp in enumerate(pt.templates):
-            nodes = [None] * tp.num_nodes
-            nodes[0] = root
-            closing = [None] * tp.num_closes
-            for k in range(tp.num_nodes):
-                r = nodes[k]
-                q = tp.players[k]
-                for a, child in enumerate(tp.children[k]):
-                    c = list(r)
-                    c[q] = r[q] * hsig[t][k][..., a]
-                    if child[0] == "node":
-                        nodes[child[1]] = tuple(c)
-                    elif child[0] == "close":
-                        closing[child[1]] = tuple(c)
-            out.append(nodes)
-            if t + 1 < pt.num_streets:
-                parent = pt.streets[t + 1].parent
-                Dn = len(pt.streets[t + 1].deals)
-                root = tuple(np.stack([closing[c][p][parent] for c in range(tp.num_closes)], axis=2)
-                             .reshape(Dn, -1, H) for p in (0, 1))
-        return out
+        return forward(self.pt, hsig)
 
     def values(self, p: int, hsig, reach, mode: str = "cfr"):
-        """Player p's counterfactual value of each hand at every decision node, bottom-up.
-
-        mode "cfr": p plays hsig; returns (values, regrets at p's nodes).
-        mode "br":  p best-responds; returns (values, None).
-        """
-        pt = self.pt
-        o = 1 - p
-        sign = 1.0 if p == 0 else -1.0
-        T = pt.num_streets
-        next_root = None
-        all_values, all_regrets = [None] * T, [None] * T
-        for t in range(T - 1, -1, -1):
-            tp, st = pt.templates[t], pt.streets[t]
-            contrib = pt.contrib[t][None, :, None]
-            V = [None] * tp.num_nodes
-            R = [None] * tp.num_nodes
-            if next_root is not None:  # value of each closing line, summed over the next street's deals
-                Dn, Ln, H = next_root.shape
-                agg = _segment_sum(next_root.reshape(Dn, -1, tp.num_closes, H), pt.streets[t + 1].parent,
-                                   len(st.deals))
-            for k in range(tp.num_nodes - 1, -1, -1):
-                q = tp.players[k]
-                rk = reach[t][k]
-                cv = np.empty((len(tp.actions[k]),) + rk[o].shape)
-                for a, child in enumerate(tp.children[k]):
-                    ro = rk[o] * hsig[t][k][..., a] if q == o else rk[o]
-                    if child[0] == "node":
-                        v = V[child[1]]
-                    elif child[0] == "fold":
-                        _, folder, extra = child
-                        lost = contrib + extra
-                        u0 = -lost if folder == 0 else lost
-                        v = sign * u0 * st.fold(ro, p)
-                    elif t == T - 1:  # showdown
-                        chips = contrib + tp.closes[child[1]][1]
-                        # player 0 wins pot x share - chips; player 1 the negative
-                        v = sign * chips * (2 * st.share(ro, p) - st.fold(ro, p))
-                    else:
-                        v = agg[:, :, child[1], :]
-                    cv[a] = v
-                if q != p:
-                    V[k] = cv.sum(0)
-                elif mode == "br":
-                    V[k] = cv.max(0)
-                else:
-                    A = cv.shape[0]
-                    V[k] = np.empty(cv.shape[1:])
-                    R[k] = np.empty(cv.shape[1:] + (A,))
-                    _expectation(np.ascontiguousarray(hsig[t][k]).reshape(-1, A), cv.reshape(A, -1),
-                                 V[k].reshape(-1), R[k].reshape(-1, A))
-            all_values[t], all_regrets[t] = V, R
-            next_root = V[0]
-        return all_values, all_regrets
+        return backward(self.pt, hsig, reach, p, mode)
 
     # Iterations ---------------------------------------------------------------------
 
@@ -238,7 +270,8 @@ class RangeCFR(IterativeSolver):
                 A = self.regret[t][k].shape[-1]
                 self.sigma[t][k] = np.ascontiguousarray(self.sigma[t][k])  # updated in place below
                 own = np.ascontiguousarray(self.own_reach(t, k, reach)).reshape(-1)
-                _update(self.regret[t][k].reshape(-1, A), np.ascontiguousarray(regrets[t][k]).reshape(-1, A),
+                _update(self.regret[t][k].size, self.regret[t][k].reshape(-1, A),
+                        np.ascontiguousarray(regrets[t][k]).reshape(-1, A),
                         self.sigma[t][k].reshape(-1, A), self.cum[t][k].reshape(-1, A), own, weight, pos, neg,
                         VARIANTS[self.variant])
         self.solve_seconds += time.perf_counter() - start
