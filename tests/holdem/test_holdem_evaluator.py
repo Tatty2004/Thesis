@@ -10,8 +10,10 @@ import random
 import pytest
 
 from bombpot.holdem.cards import Deck
+import numpy as np
+
 from bombpot.holdem.evaluator import (CATEGORY_NAMES, FLUSH, FULL_HOUSE, HIGH_CARD, PAIR, QUADS, STRAIGHT,
-                                      STRAIGHT_FLUSH, TRIPS, TWO_PAIR, category, hand_value)
+                                      STRAIGHT_FLUSH, TRIPS, TWO_PAIR, category, hand_value, hand_values)
 
 pytest.importorskip("pyspiel")
 from acpc import acpc_winner  # noqa: E402
@@ -89,14 +91,30 @@ def test_direct_algorithm_equals_best_five_card_subset():
                 FULL.cards_str(cards)
 
 
-@pytest.mark.slow
 def test_every_five_card_category_occurs_in_proportion():
     # The known counts of five-card hands out of C(52, 5): high card 1,302,540 down to 40
     # straight flushes. Check on every hand (2.6M), as a whole-ranking sanity check.
-    counts = [0] * 9
-    for five in itertools.combinations(FULL.cards, 5):
-        counts[category(hand_value([c // 4 for c in five], [c % 4 for c in five]))] += 1
-    assert counts == [1302540, 1098240, 123552, 54912, 10200, 5108, 3744, 624, 40]
+    values = hand_values(np.array(list(itertools.combinations(FULL.cards, 5))), 4)
+    assert np.bincount(values // 16**5).tolist() == [1302540, 1098240, 123552, 54912, 10200, 5108, 3744, 624, 40]
+
+
+@pytest.mark.slow
+def test_reference_evaluator_equals_compiled_on_every_five_card_hand():
+    # With the count above, this ties the reference evaluator to the whole ranking.
+    five = np.array(list(itertools.combinations(FULL.cards, 5)))
+    want = hand_values(five, 4)
+    for row, v in zip(five.tolist(), want.tolist()):
+        assert hand_value([c // 4 for c in row], [c % 4 for c in row]) == v
+
+
+@pytest.mark.parametrize("num_ranks, num_suits", [(13, 4), (6, 3), (5, 2), (4, 4)])
+def test_compiled_evaluator_equals_reference(num_ranks, num_suits):
+    deck = Deck(num_ranks, num_suits)
+    rng = random.Random(num_ranks * num_suits)
+    for n in range(1, min(7, deck.size) + 1):
+        rows = np.array([rng.sample(deck.cards, n) for _ in range(5000)])
+        want = [hand_value([deck.rank(c) for c in r], [deck.suit(c) for c in r]) for r in rows.tolist()]
+        assert hand_values(rows, num_suits).tolist() == want
 
 
 @pytest.mark.parametrize("num_ranks, num_suits, board_len, deals", [
