@@ -94,7 +94,7 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
   - Limit: the two-board reference was written by Claude, the same author as the game, so it is less independent than Board-Leduc's Check A. ACPC judges its showdowns, and `universal_poker` independently covers all of one-board play.
 - Card-level trees grow fast: N = 4, S = 2 with two boards and two streets already has 307k infosets and 474k terminals. The tree solver only handles tiny decks, and R2's range solver takes over from there.
 - **R2 passes (2026-10-06).** `core/public.py` builds a game's public tree (betting templates read off the limit engine, deals, and per-street `fold`/`share` operators, dense for small games). `core/solvers/range_cfr.py` runs CFR, CFR+ and DCFR on it with ranges as vectors, optionally bucketed (`abstraction/abstract_game.range_buckets`). `tests/test_range_cfr.py` (about 50 s) checks it against the tree solver on Kuhn, Leduc, Board-Leduc (all deck modes) and tiny Hold'em:
-  - Free-running iterates of all three variants agree to 1e-9 for 20 iterations.
+  - Free-running iterates of all three variants agree to 1e-9 for 20 iterations, on the games without exact ties (see below). Every game, ties or not, agrees in lockstep.
   - In lockstep along the tree solver's 40-iteration trajectory, instant regrets and averaging weights agree to 1e-12. This holds for the full game and for bucketed games against the abstract tree.
   - Best responses, exploitability and value of any profile agree to 1e-12. That includes a bucketed strategy's total error.
   - DCFR converges to the LP value.
@@ -113,8 +113,33 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
     - On the real deck, one deal's values (both players, all hands) equal a brute force over every hand pair and betting path to 1e-11 (slow).
     - Swapping boards, and relabeling suits neither flop uses, leave best responses and value unchanged to 1e-12.
   - The `solve` experiment takes `solver.backend: range` (`configs/holdem/range_smoke.yaml`).
-- R5 (the river) is next.
+  - The R4 numbers above come from a one-off script on uncommitted code, not from the experiment runner, and used the default bets (ante 1, bets [2, 4]).
+- **R4 re-verified (2026-10-06).**
+  - LP cross-check (`test_holdem_scale.py`): two fixed-flop flop-and-turn games go through the real deck's path (`holdem_public_tree`, card-removal streets, range solver) and are also solved exactly by the LP on the compiled tree. One of them, 6x2 with two-card flops, has five-card hands, so straights and flushes occur.
+    - The LP's equilibrium grades as unexploitable on the card-removal path (below 1e-7, value to 1e-8).
+    - DCFR on that path converges to the LP value.
+    - The tree solver grades DCFR's strategy exactly as the range solver does (1e-12).
+  - Compiled kernels: every kernel's parallel and serial variants give bit-identical results (`tests/test_kernels.py`). Small games reach only the serial variants and the real deck only the parallel ones, so this is what lets small-game tests speak for real-deck runs.
+  - Bug fixed: numba's on-disk cache ignores the `parallel` flag, so the two variants shared one cache entry and the parallel one could silently run serial code (`core/jit.py` now compiles the serial one from a renamed copy).
+- **R5 (the river): built and verified on small decks (2026-10-06).**
+  - `HoldemRiver` (`holdem/public.py`) makes river deals on demand from per-board strength tables. It needs fixed flops, a shared deck, and one turn and one river card.
+  - `core/solvers/sampled_cfr.py`:
+    - Public chance sampling (Johanson et al. 2012): each iteration samples `batch` turn deals and `samples` river deals of each, divides chance weights by the sampling probabilities, and runs the range solver's passes on that sample.
+    - Linear weighting: iteration t counts t.
+    - `exact_exploitability` streams every river deal to grade a stored strategy exactly.
+  - `core/abstraction/river.py`: river infosets that forget the river cards. One row per turn deal; hands are bucketed by equity on each board against a uniform range (`avg_1d` or `kmeans_2d`), with centers fitted per turn deal. `Lossless` (every river deal its own row) gives the exact game, for checks.
+  - Tests (`tests/holdem/test_holdem_river.py`, small game: 5 ranks x 3 suits, fixed flops, 3,024 river deals):
+    - The streamed exact evaluation grades random stored strategies exactly as the full-width range solver grades them spread over every river deal (1e-12), for the lossless abstraction and both bucket methods.
+    - Sampled instant regrets are exactly unbiased: averaged over every possible sample, of river cards and of turn deals, they equal the full-width regrets summed into the same infosets, for all three abstractions.
+    - One iteration applies its sample exactly: regrets grow by t x the instant regrets, the average by t x own reach x the strategy played, then regret matching.
+    - Equity matches a brute-force count, and the buckets are well formed.
+    - On 52 cards, river sums match brute force and chance weights match the closed form.
+    - The sampled solver converges (slow): lossless, every turn deal with 4 of its 42 rivers, exploitability goes from 2.31 at iteration 25 to 0.18 at 200.
+    - The full-width reference itself matches the tree solver on a three-street game (`tests/test_range_cfr.py`, slow, 2.4M terminals).
+  - Real-deck cost, measured: an exact evaluation of a three-street strategy streams 3.9M river deals at about 12.5 ms each, **about 14 hours** on this laptop (peak about 6 GB). Real-deck R5 runs and their evaluation need the cluster or more speed.
+  - Not yet run on the real deck: fitting buckets for all 2,070 turn deals, and a real-deck sampled solve.
 
 ## Open decisions
-1. **Bet sizes for the real game** (limit, sizes to be decided). Not needed until R4.
-2. **Where the layer ends:** R4, or R5 as well. Decide after R4's timings.
+1. **Bet sizes for the real game.** Still undecided. The R4 runs used ante 1, bets [2, 4]; the three-street tests use [2, 4, 4] (small bet on the flop, big bet after). Provisional.
+2. **The river abstraction:** equity buckets per turn deal (imperfect recall, the usual choice in poker solvers). Built and tested, but it shapes what the thesis can claim. Needs sign-off.
+3. **Where the layer ends:** R4, or R5 as well. A real-deck R5 solve and its exact evaluation take many hours (see R5).

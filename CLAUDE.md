@@ -74,21 +74,26 @@ bombpot/
   core/          game.py (Game and CardGame protocols), limit.py (limit-betting engine, LimitPoker),
                  tree.py (compile a Game to sequence-form arrays, strategy utilities, saved strategies),
                  public.py (public tree for range solvers: betting templates, deals, fold/share operators),
-                 removal.py (card-removal fold/showdown sums in O(hands) per deal, compiled)
+                 removal.py (card-removal fold/showdown sums in O(hands) per deal, compiled),
+                 jit.py (compile kernels in parallel and serial variants, picked by problem size)
     solvers/     cfr.py (CFR, CFR+, DCFR on the tree), range_cfr.py (the same on the public tree, ranges as
-                 vectors), lp.py (sequence-form LP, best response as an LP)
+                 vectors), sampled_cfr.py (public chance sampling for a last street too big to enumerate,
+                 with an exact streamed evaluator), lp.py (sequence-form LP, best response as an LP)
     eval/        best_response.py, exploitability.py, audit.py (dominated actions)
-    abstraction/ features.py, bucketing.py, abstract_game.py
+    abstraction/ features.py, bucketing.py, abstract_game.py, river.py (river infosets that forget the
+                 river cards: equity buckets per turn deal)
   toygames/      kuhn.py, leduc.py, board_leduc.py, CLAUDE.md
-  holdem/        cards.py (any deck size), evaluator.py (best five-card hand), game.py (Holdem),
-                 public.py (the public tree with card-removal streets, up to 52 cards), CLAUDE.md
+  holdem/        cards.py (any deck size), evaluator.py (best five-card hand, and a compiled bulk version),
+                 game.py (Holdem), public.py (the public tree with card-removal streets, up to 52 cards, and
+                 HoldemRiver, river deals on demand), CLAUDE.md
   experiments/   games.py (every game a config can name, and its public tree), run.py (runner and bookkeeping;
                  `solver.backend: range` solves with the range solver),
                  grid.py (bucketing grid, table, plot), certify.py (equilibrium certification),
                  configs/<layer>/*.yaml
 scripts/count_sizes.py
 tests/           conftest.py (--runslow), helpers.py, game_diff.py, openspiel_game.py (shared tools),
-                 test_rules.py (layering rules), test_range_cfr.py (range solver vs tree solver), toygames/, holdem/
+                 test_rules.py (layering rules), test_range_cfr.py (range solver vs tree solver),
+                 test_kernels.py (parallel and serial kernels agree), toygames/, holdem/
 results/         gitignored
 pyproject.toml
 ```
