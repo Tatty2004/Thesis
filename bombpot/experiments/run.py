@@ -8,7 +8,8 @@ to results/<config hash>/. A run whose result.json already exists at the current
 clean git hash is reused unless --force is given.
 
 Experiments:
-  solve    full-game DCFR (plus the LP for small games) for every game in the sweep
+  solve    full-game DCFR (plus the LP for small games) for every game in the sweep; with
+           solver.backend "range", the range solver on the game's public tree
   grid     the bucketing experiment (see grid.py)
   certify  re-certify full-game equilibria with independent methods (see certify.py)
 """
@@ -153,8 +154,10 @@ def solve_one(job) -> dict:
         return cached
     seed_everything(cfg["seed"])
     run_dir = start_run(cfg, git)
-    tree = tree_for(cfg["game"])
     s = cfg["solver"]
+    if s.get("backend", "tree") == "range":
+        return finish_run(run_dir, solve_range(cfg, run_dir))
+    tree = tree_for(cfg["game"])
     solver = CFR(tree, s["variant"], s.get("alpha", 1.5), s.get("beta", 0.0), s.get("gamma", 2.0))
     rows = solver.run(iterations=s.get("iterations"), tol=s.get("tol"), max_iterations=s.get("max_iterations", 100_000),
                       log_every=s["log_every"], log_path=run_dir / "log.csv")
@@ -174,22 +177,43 @@ def solve_one(job) -> dict:
     return finish_run(run_dir, result)
 
 
+def solve_range(cfg: dict, run_dir: Path) -> dict:
+    """Full-game solve with the range solver (core/solvers/range_cfr.py); saves the average strategy."""
+    from bombpot.core.solvers.range_cfr import RangeCFR, infoset_count, save_range_strategy
+    from bombpot.experiments.games import public_tree
+
+    s = cfg["solver"]
+    pt = public_tree(build_game(cfg["game"]))
+    solver = RangeCFR(pt, s["variant"], s.get("alpha", 1.5), s.get("beta", 0.0), s.get("gamma", 2.0))
+    rows = solver.run(iterations=s.get("iterations"), tol=s.get("tol"), max_iterations=s.get("max_iterations", 100_000),
+                      log_every=s["log_every"], log_path=run_dir / "log.csv")
+    last = rows[-1]
+    save_range_strategy(run_dir / f"strategy_{s['variant']}.npz", solver.average_strategy(), game=pt.name,
+                        iterations=solver.t, exploitability=last["exploitability"])
+    return {"game": pt.name, "infosets": infoset_count(pt), "deals": [len(st.deals) for st in pt.streets],
+            "iterations": solver.t, "solve_seconds": solver.solve_seconds,
+            "ms_per_iteration": 1000 * solver.solve_seconds / solver.t,
+            **{k: last[k] for k in ("exploitability", "game_value", "br_value_p0", "br_value_p1")}}
+
+
 def run_solve(cfg: dict, out: Path, workers: int, force: bool, git: dict) -> None:
     jobs = []
-    for combo in expand(cfg.get("sweep", {})):
+    sweep = cfg.get("sweep", {})
+    for combo in expand(sweep):
         gcfg = game_cfg(cfg["game"], combo)
         run = {"experiment": "solve", "seed": cfg["seed"], "game": gcfg, "solver": cfg["solver"],
                "lp": gcfg.get("num_ranks", 0) <= cfg.get("lp_max_ranks", 0)}
         jobs.append((run, force, git))
-    for run, _, _ in jobs:  # compile once, up front, so workers only load the cache
-        tree_for(run["game"])
+    if cfg["solver"].get("backend", "tree") == "tree":
+        for run, _, _ in jobs:  # compile once, up front, so workers only load the cache
+            tree_for(run["game"])
     results = run_parallel(solve_one, jobs, workers)
     rows = []
     for (run, _, _), res in zip(jobs, results):
-        rows.append({**{k: run["game"].get(k) for k in ("num_ranks", "deck_mode")}, **res,
-                     "run": config_hash(run)})
-    cols = ["num_ranks", "deck_mode", "infosets", "terminals", "iterations", "ms_per_iteration", "solve_seconds",
-            "exploitability", "game_value", "lp_value", "lp_seconds", "run"]
+        rows.append({**{k: run["game"].get(k) for k in sorted(sweep)}, **res, "run": config_hash(run)})
+    cols = sorted(sweep) + ["infosets", "terminals", "deals", "iterations", "ms_per_iteration", "solve_seconds",
+                            "exploitability", "game_value", "lp_value", "lp_seconds", "run"]
+    cols = [c for c in cols if any(c in r for r in rows)]
     fmt = {"infosets": "{:,}", "terminals": "{:,}", "ms_per_iteration": "{:.1f}", "solve_seconds": "{:.1f}",
            "exploitability": "{:.2e}", "game_value": "{:+.6f}", "lp_value": "{:+.6f}", "lp_seconds": "{:.1f}"}
     table = markdown_table(rows, cols, fmt)

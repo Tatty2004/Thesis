@@ -20,7 +20,7 @@ The work is built in layers. Each layer is a package under `bombpot/` with its o
 - **Don't expand scope.** No neural methods, multiway, or performance work beyond what the current step needs. If something seems necessary, stop and ask.
 
 ## Stack
-Python 3.11+, numpy, scipy (`linprog` with HiGHS), POT (Earth Mover's Distance), pyyaml, pytest, matplotlib (plots only, in `experiments/`). `open_spiel` only inside `tests/` for cross-checks.
+Python 3.11+, numpy, scipy (`linprog` with HiGHS), numba (the range solver's sweeps), POT (Earth Mover's Distance), pyyaml, pytest, matplotlib (plots only, in `experiments/`). `open_spiel` only inside `tests/` for cross-checks.
 
 Use `.venv/bin/python` (3.11, package installed with `pip install -e .`). The system `python3` is 3.9. OpenSpiel's `sequence_form_lp` needs cvxpy, which isn't installed, so tests use its `exploitability`, `expected_game_score` and CFR solvers instead. OpenSpiel's `universal_poker` (the ACPC poker engine) is available and is the outside reference for Hold'em rules.
 
@@ -45,7 +45,7 @@ Symmetric for player 1. Compare values within 1e-6.
 
 **Implementation.** `core/tree.py` compiles a game into sequence-form arrays. Each player's sequences are grouped by level. Each terminal is stored as (player 0's last sequence, player 1's last sequence, chance x payoff). A CFR iteration or a best response is then one gather and one bincount over the terminals, plus one pass per level of sequences. This stores every terminal, so it tops out around 10 million terminals.
 
-**Range solver.** `core/public.py` and `core/solvers/range_cfr.py` run the same algorithms on the public tree, with each player's range as a vector over hands. Cost grows with public states x hands, not with hand pairs. It reproduces the tree solver exactly (`tests/test_range_cfr.py`).
+**Range solver.** `core/public.py` and `core/solvers/range_cfr.py` run the same algorithms on the public tree, with each player's range as a vector over hands. Cost grows with public states x hands, not with hand pairs. It reproduces the tree solver exactly (`tests/test_range_cfr.py`). Big games use card-removal streets (`core/removal.py`): fold and showdown sums by inclusion-exclusion over each hand's card subsets and a sweep in strength order, compiled with numba.
 
 ## Conventions
 - Player 0 acts first each street. `returns()` sums to zero.
@@ -73,14 +73,17 @@ Symmetric for player 1. Compare values within 1e-6.
 bombpot/
   core/          game.py (Game and CardGame protocols), limit.py (limit-betting engine, LimitPoker),
                  tree.py (compile a Game to sequence-form arrays, strategy utilities, saved strategies),
-                 public.py (public tree for range solvers: betting templates, deals, fold/share operators)
+                 public.py (public tree for range solvers: betting templates, deals, fold/share operators),
+                 removal.py (card-removal fold/showdown sums in O(hands) per deal, compiled)
     solvers/     cfr.py (CFR, CFR+, DCFR on the tree), range_cfr.py (the same on the public tree, ranges as
                  vectors), lp.py (sequence-form LP, best response as an LP)
     eval/        best_response.py, exploitability.py, audit.py (dominated actions)
     abstraction/ features.py, bucketing.py, abstract_game.py
   toygames/      kuhn.py, leduc.py, board_leduc.py, CLAUDE.md
-  holdem/        cards.py (any deck size), evaluator.py (best five-card hand), game.py (Holdem), CLAUDE.md
-  experiments/   games.py (every game a config can name), run.py (runner and bookkeeping),
+  holdem/        cards.py (any deck size), evaluator.py (best five-card hand), game.py (Holdem),
+                 public.py (the public tree with card-removal streets, up to 52 cards), CLAUDE.md
+  experiments/   games.py (every game a config can name, and its public tree), run.py (runner and bookkeeping;
+                 `solver.backend: range` solves with the range solver),
                  grid.py (bucketing grid, table, plot), certify.py (equilibrium certification),
                  configs/<layer>/*.yaml
 scripts/count_sizes.py

@@ -99,7 +99,21 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
   - Best responses, exploitability and value of any profile agree to 1e-12. That includes a bucketed strategy's total error.
   - DCFR converges to the LP value.
   - **Exact ties:** where a regret is exactly zero by symmetry, one solver computes 0 and the other ±1e-19, and regret matching then plays uniform in one and pure in the other. Both are right, so those games are checked in lockstep only. Bucketing creates such ties often.
-- R3 is next.
+- **R3 passes (2026-10-06).**
+  - `core/removal.py` (`CardStreet`): fold and showdown sums over the opponent's range in O(hands) per deal, by inclusion-exclusion over each hand's card subsets and a sweep in strength order. It works for any hand size (PLO later). The sweeps are compiled with numba, which was added to the stack because numpy gathers took 44 s per real-game iteration.
+  - `holdem/public.py` lists public deals directly, so building the real deck's tree takes 0.5 s.
+  - Tests (`tests/holdem/test_holdem_public.py`):
+    - On 6 small configurations, the public tree equals the dense one from `core/public.py` (deals, parents, possible hands, betting, fold and showdown sums to 1e-13). Several have 5- and 6-card hands, so straights and flushes are covered.
+    - Lockstep regrets agree.
+    - On 52 cards, the sums equal brute force (an explicit loop over opponent hands with the evaluator), and chance weights sum to 1.
+- **R4 runs (2026-10-06).** Real 52-card deck, flops `Ah7c2d` / `KsKd9h`, flop and turn: 1,035 hands, 2,070 turn deals, 4.3 s per DCFR iteration (8 threads), about 4.5 GB.
+  - 200 iterations (10 min) reach exploitability 5.2e-4 chips per hand, with game value -0.0621 for player 0.
+  - Iterations 10 / 20 / 130 / 200 have exploitability 0.18 / 0.050 / 0.0012 / 0.00052.
+  - Tests (`tests/holdem/test_holdem_scale.py`):
+    - On the real deck, one deal's values (both players, all hands) equal a brute force over every hand pair and betting path to 1e-11 (slow).
+    - Swapping boards, and relabeling suits neither flop uses, leave best responses and value unchanged to 1e-12.
+  - The `solve` experiment takes `solver.backend: range` (`configs/holdem/range_smoke.yaml`).
+- R5 (the river) is next.
 
 ## Open decisions
 1. **Bet sizes for the real game** (limit, sizes to be decided). Not needed until R4.

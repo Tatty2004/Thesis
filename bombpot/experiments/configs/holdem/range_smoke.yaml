@@ -1,0 +1,12 @@
+# End-to-end check of the range backend on small decks (about 30 s).
+title: "Range solver smoke test"
+experiment: solve
+seed: 0
+game:
+  name: holdem
+  num_ranks: 5
+  num_suits: 3
+  board_cards: [3, 1]
+sweep:
+  flops: [["2c3c4d", "5c6d4c"], ["2d5d6c", "3c3d4c"]]
+solver: {backend: range, variant: dcfr, alpha: 1.5, beta: 0.0, gamma: 2.0, tol: 1.0e-4, max_iterations: 3000, log_every: 50}
