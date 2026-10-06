@@ -1,0 +1,19 @@
+# Check B: re-certify full-game equilibria for N = 4 to 7 (see bombpot/experiments/certify.py).
+# Saves each game's DCFR strategy (and the LP's where it runs) as {infoset key: action probabilities}.
+title: "Check B: equilibrium certification"
+experiment: certify
+seed: 0
+game:
+  name: board_leduc
+  num_boards: 2
+  streets: 2
+sweep:
+  num_ranks: [4, 5, 6, 7]
+  deck_mode: [shared, independent]
+solvers:
+  dcfr: {variant: dcfr, alpha: 1.5, beta: 0.0, gamma: 2.0, tol: 1.0e-5, max_iterations: 20000, log_every: 50}
+  cfr+: {variant: cfr+, iterations: 2000, log_every: 100}
+  cfr: {variant: cfr, iterations: 2000, log_every: 100}
+lp_max_ranks: 5
+lp_br_max_ranks: 7
+random_profiles: 2

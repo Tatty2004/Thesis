@@ -11,14 +11,16 @@ import numpy as np
 import pyspiel
 from open_spiel.python import policy as os_policy
 
-from toygames.games.base import CALL, CHANCE, FOLD, RAISE
+from bombpot.core.game import CHANCE
+
+from bombpot.core.limit import CALL, FOLD, RAISE
 
 ACTIONS = (FOLD, CALL, RAISE)
 _GAMES: dict = {}  # id -> our game, so states refer to their game without copying it
 
 _TYPE = pyspiel.GameType(
-    short_name="python_toygames_wrapper",
-    long_name="toygames game wrapped for OpenSpiel (tests only)",
+    short_name="python_bombpot_wrapper",
+    long_name="bombpot game wrapped for OpenSpiel (tests only)",
     dynamics=pyspiel.GameType.Dynamics.SEQUENTIAL,
     chance_mode=pyspiel.GameType.ChanceMode.EXPLICIT_STOCHASTIC,
     information=pyspiel.GameType.Information.IMPERFECT_INFORMATION,
@@ -34,7 +36,7 @@ _TYPE = pyspiel.GameType(
 
 
 class OpenSpielGame(pyspiel.Game):
-    """`game` (any toygames Game with integer chance outcomes) as a pyspiel.Game."""
+    """`game` (any bombpot Game with integer chance outcomes) as a pyspiel.Game."""
 
     def __init__(self, game, max_chance_outcomes: int = 64):
         info = pyspiel.GameInfo(num_distinct_actions=len(ACTIONS), max_chance_outcomes=max_chance_outcomes,

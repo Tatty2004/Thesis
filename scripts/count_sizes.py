@@ -5,8 +5,8 @@
 import argparse
 import time
 
-from toygames.games import BoardLeduc
-from toygames.tree import compile_game
+from bombpot.toygames import BoardLeduc
+from bombpot.core.tree import compile_game
 
 
 def main():

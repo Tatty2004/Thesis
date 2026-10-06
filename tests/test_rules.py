@@ -1,22 +1,38 @@
-"""The layering rules from CLAUDE.md, checked on the source."""
+"""The layering rules from CLAUDE.md, checked on the source.
+
+core/ is game-agnostic: it imports no layer and names no game. The layers (toygames/,
+holdem/) build on core/ only and never import each other. experiments/ may use
+everything. OpenSpiel appears only in tests/.
+"""
 import re
 from pathlib import Path
 
 import pytest
 
-PKG = Path(__file__).resolve().parents[1] / "toygames"
-GAME_AGNOSTIC = ["solvers", "eval", "abstraction"]
-SPECIFIC = re.compile(r"\b(kuhn|leduc|board_leduc|Kuhn|Leduc|BoardLeduc|make_game|GAMES)\b")
+PKG = Path(__file__).resolve().parents[1] / "bombpot"
+LAYERS = ["toygames", "holdem"]
+SPECIFIC = re.compile(r"\b(kuhn|leduc|board_leduc|holdem|Kuhn|Leduc|BoardLeduc|Holdem|make_game|GAMES)\b")
 
 
-@pytest.mark.parametrize("package", GAME_AGNOSTIC)
-def test_game_agnostic_layers_reference_no_specific_game(package):
-    for path in (PKG / package).glob("*.py"):
-        src = path.read_text()
-        for line in src.splitlines():
-            if line.lstrip().startswith(("import ", "from ")) and "toygames.games" in line:
-                assert "toygames.games.base" in line, f"{path.name}: {line.strip()}"
-        assert not SPECIFIC.search(src), f"{path.name} names a specific game"
+def imports(path: Path) -> list[str]:
+    return [line.strip() for line in path.read_text().splitlines()
+            if line.lstrip().startswith(("import ", "from "))]
+
+
+def test_core_imports_no_layer_and_names_no_game():
+    for path in (PKG / "core").rglob("*.py"):
+        for line in imports(path):
+            if "bombpot" in line:
+                assert line.startswith(("from bombpot.core", "import bombpot.core")), f"{path.name}: {line}"
+        assert not SPECIFIC.search(path.read_text()), f"{path.name} names a specific game"
+
+
+@pytest.mark.parametrize("layer", LAYERS)
+def test_layers_build_on_core_only(layer):
+    for path in (PKG / layer).rglob("*.py"):
+        for line in imports(path):
+            if "bombpot" in line:
+                assert re.match(rf"(from|import) bombpot\.(core|{layer})\b", line), f"{layer}/{path.name}: {line}"
 
 
 def test_open_spiel_only_in_tests():

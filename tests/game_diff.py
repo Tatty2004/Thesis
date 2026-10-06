@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from toygames.games.base import CHANCE
+from bombpot.core.game import CHANCE
 
 CATEGORIES = (
     "internal",       # a game disagrees with itself: chance sums, zero-sum, suits changing the outcome

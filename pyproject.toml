@@ -3,9 +3,9 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "toygames"
+name = "bombpot"
 version = "0.1.0"
-description = "Toy-game layer of a double-board PLO bomb-pot GTO solver"
+description = "GTO solving for heads-up double-board bomb pots: toy games, Hold'em, PLO"
 requires-python = ">=3.11"
 dependencies = ["numpy", "scipy", "POT", "pyyaml", "matplotlib"]
 
@@ -13,10 +13,10 @@ dependencies = ["numpy", "scipy", "POT", "pyyaml", "matplotlib"]
 test = ["pytest", "open_spiel"]
 
 [tool.setuptools.packages.find]
-include = ["toygames*"]
+include = ["bombpot*"]
 
 [tool.setuptools.package-data]
-"toygames.experiments" = ["configs/*.yaml"]
+"bombpot.experiments" = ["configs/*/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

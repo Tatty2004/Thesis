@@ -6,7 +6,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from toygames.games.base import CHANCE
+from bombpot.core.game import CHANCE
 
 
 def naive_value(game, table: dict) -> float:
