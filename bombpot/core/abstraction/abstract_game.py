@@ -89,3 +89,27 @@ def build_abstract_game(full: Tree, bucketing: Bucketing) -> AbstractGame:
     tree = Tree(name=name, **{k: [fields[0][k], fields[1][k]] for k in fields[0]}, term_seq=[s0, s1], term_cu0=cu0,
                 stats={"full_infosets": full.n_infosets, "full_terminals": full.n_terminals})
     return AbstractGame(tree, infoset_maps, seq_maps)
+
+
+def range_buckets(pt, bucketing: Bucketing) -> list:
+    """The bucketing as infoset ids for the range solver: ids[t][p] is (D_t, H).
+
+    A hand's id at a deal stands for its buckets on every street so far (perfect recall,
+    as in the abstract tree's keys). Hands that can't be held at a deal get their own
+    spare id, so they never share regrets or reach with real hands."""
+    out = []
+    for t, st in enumerate(pt.streets):
+        per_player = []
+        for p in (0, 1):
+            possible = st.possible(p)
+            D, H = possible.shape
+            ids = np.zeros((D, H), dtype=np.int64)
+            for d, board in enumerate(st.deals):
+                seen = {}
+                for i in np.flatnonzero(possible[d]):
+                    key = tuple(bucketing.bucket(u, p, board, pt.hands[i]) for u in range(t + 1))
+                    ids[d, i] = seen.setdefault(key, len(seen))
+                ids[d, ~possible[d]] = len(seen)
+            per_player.append(ids)
+        out.append(per_player)
+    return out

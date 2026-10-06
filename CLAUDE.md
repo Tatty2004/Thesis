@@ -43,7 +43,9 @@ Symmetric for player 1. Compare values within 1e-6.
 
 **Exploitability** = NashConv / 2, in chips per hand, on the **average** strategy. Matches OpenSpiel.
 
-**Implementation.** `core/tree.py` compiles a game into sequence-form arrays. Each player's sequences are grouped by level. Each terminal is stored as (player 0's last sequence, player 1's last sequence, chance x payoff). A CFR iteration or a best response is then one gather and one bincount over the terminals, plus one pass per level of sequences. This stores every terminal, so it tops out around 10 million terminals. The Hold'em layer adds a range solver for larger games.
+**Implementation.** `core/tree.py` compiles a game into sequence-form arrays. Each player's sequences are grouped by level. Each terminal is stored as (player 0's last sequence, player 1's last sequence, chance x payoff). A CFR iteration or a best response is then one gather and one bincount over the terminals, plus one pass per level of sequences. This stores every terminal, so it tops out around 10 million terminals.
+
+**Range solver.** `core/public.py` and `core/solvers/range_cfr.py` run the same algorithms on the public tree, with each player's range as a vector over hands. Cost grows with public states x hands, not with hand pairs. It reproduces the tree solver exactly (`tests/test_range_cfr.py`).
 
 ## Conventions
 - Player 0 acts first each street. `returns()` sums to zero.
@@ -70,8 +72,10 @@ Symmetric for player 1. Compare values within 1e-6.
 ```
 bombpot/
   core/          game.py (Game and CardGame protocols), limit.py (limit-betting engine, LimitPoker),
-                 tree.py (compile a Game to sequence-form arrays, strategy utilities, saved strategies)
-    solvers/     cfr.py (CFR, CFR+, DCFR), lp.py (sequence-form LP, best response as an LP)
+                 tree.py (compile a Game to sequence-form arrays, strategy utilities, saved strategies),
+                 public.py (public tree for range solvers: betting templates, deals, fold/share operators)
+    solvers/     cfr.py (CFR, CFR+, DCFR on the tree), range_cfr.py (the same on the public tree, ranges as
+                 vectors), lp.py (sequence-form LP, best response as an LP)
     eval/        best_response.py, exploitability.py, audit.py (dominated actions)
     abstraction/ features.py, bucketing.py, abstract_game.py
   toygames/      kuhn.py, leduc.py, board_leduc.py, CLAUDE.md
@@ -81,7 +85,7 @@ bombpot/
                  configs/<layer>/*.yaml
 scripts/count_sizes.py
 tests/           conftest.py (--runslow), helpers.py, game_diff.py, openspiel_game.py (shared tools),
-                 test_rules.py (layering rules), toygames/, holdem/
+                 test_rules.py (layering rules), test_range_cfr.py (range solver vs tree solver), toygames/, holdem/
 results/         gitignored
 pyproject.toml
 ```

@@ -93,7 +93,13 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
     - OpenSpiel's best response and on-policy value reproduce ours to 1e-9.
   - Limit: the two-board reference was written by Claude, the same author as the game, so it is less independent than Board-Leduc's Check A. ACPC judges its showdowns, and `universal_poker` independently covers all of one-board play.
 - Card-level trees grow fast: N = 4, S = 2 with two boards and two streets already has 307k infosets and 474k terminals. The tree solver only handles tiny decks, and R2's range solver takes over from there.
-- R2 is next.
+- **R2 passes (2026-10-06).** `core/public.py` builds a game's public tree (betting templates read off the limit engine, deals, and per-street `fold`/`share` operators, dense for small games). `core/solvers/range_cfr.py` runs CFR, CFR+ and DCFR on it with ranges as vectors, optionally bucketed (`abstraction/abstract_game.range_buckets`). `tests/test_range_cfr.py` (about 50 s) checks it against the tree solver on Kuhn, Leduc, Board-Leduc (all deck modes) and tiny Hold'em:
+  - Free-running iterates of all three variants agree to 1e-9 for 20 iterations.
+  - In lockstep along the tree solver's 40-iteration trajectory, instant regrets and averaging weights agree to 1e-12. This holds for the full game and for bucketed games against the abstract tree.
+  - Best responses, exploitability and value of any profile agree to 1e-12. That includes a bucketed strategy's total error.
+  - DCFR converges to the LP value.
+  - **Exact ties:** where a regret is exactly zero by symmetry, one solver computes 0 and the other ±1e-19, and regret matching then plays uniform in one and pure in the other. Both are right, so those games are checked in lockstep only. Bucketing creates such ties often.
+- R3 is next.
 
 ## Open decisions
 1. **Bet sizes for the real game** (limit, sizes to be decided). Not needed until R4.
