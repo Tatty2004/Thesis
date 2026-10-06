@@ -140,6 +140,17 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
   - Real-deck cost, measured: an exact evaluation of a three-street strategy streams 3.9M river deals at about 12.5 ms each, **about 14 hours** on this laptop (peak about 6 GB). Real-deck R5 runs and their evaluation need the cluster or more speed.
   - Not yet run on the real deck: fitting buckets for all 2,070 turn deals, and a real-deck sampled solve.
 
+## Next phase
+
+The full solver ("option c", agreed 2026-10-06) is planned step by step in [PLAN_full_solver.md](PLAN_full_solver.md):
+- a safe river re-solver;
+- more river groupings;
+- a split exact evaluation;
+- Ionic setup;
+- the river experiment on a smaller deck, then the real deck.
+
+Each step comes with acceptance tests and stop points. Read it before starting that work.
+
 ## Open decisions
 1. ~~Bet sizes for the real game.~~ **Decided 2026-10-06:** limit betting with ante 1, bets [2, 4, 4] (pot-sized on the flop, doubled on turn and river) and at most a bet and one raise per street. This is now `Holdem`'s default; two-street games keep [2, 4], so the R4 run stands. Limit keeps measured exploitability down to card bucketing alone; pot-limit menus wait for PLO.
 2. **The river abstraction:** equity buckets per turn deal (imperfect recall, the usual choice in poker solvers). Built and tested, but it shapes what the thesis can claim. Needs sign-off.
