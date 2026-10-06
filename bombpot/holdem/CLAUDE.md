@@ -75,7 +75,25 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
 5. Then decide on R5.
 
 ## Status
-- 2026-10-06: package reorganized into `core/`, `toygames/` and `holdem/`. The plan above is agreed. R1 is next.
+- 2026-10-06: package reorganized into `core/`, `toygames/` and `holdem/` (commit `cf24d8c`).
+- **R1 passes (2026-10-06).** Code: `holdem/cards.py`, `evaluator.py`, `game.py`. Tests in `tests/holdem/` (about 25 s, `--runslow` adds about 5 min):
+  - **Evaluator** (`test_holdem_evaluator.py`):
+    - Agrees with ACPC's evaluator on about 30,000 random showdowns (52 cards with 3, 4 and 5 board cards; short decks with fewer than five cards) and on hand-picked close calls (wheel, steel wheel, quads vs quads, board full house).
+    - Equals the best of every five-card subset on 6,000 random 6- and 7-card hands.
+    - Reproduces the textbook category counts over all 2,598,960 five-card hands (slow).
+  - **One board vs `universal_poker`** (`test_holdem_reference.py`): `game_diff` agrees on every chance probability, payoff, player and legal action in 9 configurations, the largest with 1.05 million terminal records.
+    - One street: the information partitions are identical too.
+    - Two streets: `universal_poker`'s information string sorts all board cards together, so it forgets which street a card came on. It merges infosets we keep apart, and never the reverse. With our key made equally street-blind, the partitions are identical.
+  - **Two boards vs `tests/holdem/reference_holdem.py`:** a naive implementation that deals card by card, has its own betting and chip code, and has ACPC judge every showdown. It agrees in 7 configurations (`shared` and `identical`, one and two streets). 9 injected bugs (`holdem_mutants.py`) are all caught.
+  - **Game** (`test_holdem_game.py`):
+    - Hand-checked 52-card pots: scoop, split where different hole cards hit different boards, a chopped board, folds, the biggest pot, flush and wheel.
+    - Structure: `identical` gives the same tree as one board, and swapping boards changes no deal, showdown or exploitability.
+    - **A bomb pot is the probability-weighted average of its fixed-flop games** (LP values agree to 1e-9).
+    - Solvers and keys: DCFR = LP, keys hold own cards, boards street by street and betting, and nothing else.
+    - OpenSpiel's best response and on-policy value reproduce ours to 1e-9.
+  - Limit: the two-board reference was written by Claude, the same author as the game, so it is less independent than Board-Leduc's Check A. ACPC judges its showdowns, and `universal_poker` independently covers all of one-board play.
+- Card-level trees grow fast: N = 4, S = 2 with two boards and two streets already has 307k infosets and 474k terminals. The tree solver only handles tiny decks, and R2's range solver takes over from there.
+- R2 is next.
 
 ## Open decisions
 1. **Bet sizes for the real game** (limit, sizes to be decided). Not needed until R4.

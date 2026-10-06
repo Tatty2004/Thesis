@@ -25,7 +25,7 @@ Python 3.11+, numpy, scipy (`linprog` with HiGHS), POT (Earth Mover's Distance),
 Use `.venv/bin/python` (3.11, package installed with `pip install -e .`). The system `python3` is 3.9. OpenSpiel's `sequence_form_lp` needs cvxpy, which isn't installed, so tests use its `exploitability`, `expected_game_score` and CFR solvers instead. OpenSpiel's `universal_poker` (the ACPC poker engine) is available and is the outside reference for Hold'em rules.
 
 ## Commands
-- Tests: `.venv/bin/python -m pytest`. Add `--runslow` for the longest cross-checks. Run one layer with `tests/toygames` or `tests/holdem`.
+- Tests (about 2.5 min): `.venv/bin/python -m pytest`. Add `--runslow` for the longest cross-checks (about 10 min more). Run one layer with `tests/toygames` or `tests/holdem`.
 - Experiments: `.venv/bin/python -m bombpot.experiments.run bombpot/experiments/configs/<layer>/<name>.yaml --workers 6`
   - Each layer's CLAUDE.md lists its configs.
   - `--force` reruns stored runs. `--reuse-any-commit` accepts runs stored by an older clean commit.
@@ -64,6 +64,7 @@ Symmetric for player 1. Compare values within 1e-6.
 - Raise counters reset each street. Bet size changes each street.
 - **HiGHS tolerances are absolute.** Chance-weighted payoffs are tiny, so an unscaled best-response LP stops about 1e-8 short of the optimum. `best_response_lp` scales the costs so the largest entry is 1.
 - Pickled caches in `results/cache/` refer to module paths. `features_for` recomputes features whose pickle no longer loads.
+- OpenSpiel's `universal_poker` information string sorts all public cards together, so with board cards on two rounds it lacks perfect recall. Compare partitions with a street-blind key (`tests/holdem/test_holdem_reference.py`).
 
 ## Layout
 ```
@@ -74,7 +75,7 @@ bombpot/
     eval/        best_response.py, exploitability.py, audit.py (dominated actions)
     abstraction/ features.py, bucketing.py, abstract_game.py
   toygames/      kuhn.py, leduc.py, board_leduc.py, CLAUDE.md
-  holdem/        CLAUDE.md (more as the layer is built)
+  holdem/        cards.py (any deck size), evaluator.py (best five-card hand), game.py (Holdem), CLAUDE.md
   experiments/   games.py (every game a config can name), run.py (runner and bookkeeping),
                  grid.py (bucketing grid, table, plot), certify.py (equilibrium certification),
                  configs/<layer>/*.yaml
