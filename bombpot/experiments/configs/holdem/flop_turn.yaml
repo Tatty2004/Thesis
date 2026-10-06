@@ -1,0 +1,15 @@
+# R4: real 52-card double-board Hold'em, flop and turn, one pair of flops, solved
+# full-width by DCFR on the range solver (about 15 min, ~4.5 GB).
+# Bets are provisional (ante 1, bets [2, 4]): see bombpot/holdem/CLAUDE.md, open decisions.
+title: "R4: real-deck flop and turn, full-width DCFR"
+experiment: solve
+seed: 0
+game:
+  name: holdem
+  board_cards: [3, 1]
+  ante: 1.0
+  bet_sizes: [2.0, 4.0]
+  max_raises: 2
+sweep:
+  flops: [["Ah7c2d", "KsKd9h"]]
+solver: {backend: range, variant: dcfr, alpha: 1.5, beta: 0.0, gamma: 2.0, iterations: 200, log_every: 25}
