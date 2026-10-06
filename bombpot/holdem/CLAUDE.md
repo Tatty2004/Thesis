@@ -113,7 +113,8 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
     - On the real deck, one deal's values (both players, all hands) equal a brute force over every hand pair and betting path to 1e-11 (slow).
     - Swapping boards, and relabeling suits neither flop uses, leave best responses and value unchanged to 1e-12.
   - The `solve` experiment takes `solver.backend: range` (`configs/holdem/range_smoke.yaml`).
-  - The R4 numbers above come from a one-off script on uncommitted code, not from the experiment runner, and used the default bets (ante 1, bets [2, 4]).
+  - These numbers first came from a one-off script on uncommitted code. They were reproduced exactly through the experiment runner from clean commit `f202b05` (`configs/holdem/flop_turn.yaml`, run `results/f2cebed27461/`): exploitability 5.17e-4 and value -0.062097 at 200 iterations.
+  - That run took 2.7 s per iteration (547 s in all) after the kernel fixes below. Bets are the provisional ante 1, [2, 4].
 - **R4 re-verified (2026-10-06).**
   - LP cross-check (`test_holdem_scale.py`): two fixed-flop flop-and-turn games go through the real deck's path (`holdem_public_tree`, card-removal streets, range solver) and are also solved exactly by the LP on the compiled tree. One of them, 6x2 with two-card flops, has five-card hands, so straights and flushes occur.
     - The LP's equilibrium grades as unexploitable on the card-removal path (below 1e-7, value to 1e-8).
