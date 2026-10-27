@@ -103,6 +103,8 @@ B1–B3 (real bet sizes) can be built on the laptop while M1 runs on Ionic.
 
 ### M1. First real-deck three-street solve, limit (before S1)
 
+The step-by-step procedure for running it on Ionic, with a gate of checks after every step, is [M1_CLAUDE.md](M1_CLAUDE.md).
+
 The goal is the first exploitability number for actual double-board Hold'em. M1 also measures the speed and the iterations to converge, which every later budget depends on. It uses only verified code plus new plumbing.
 
 1. **Plumbing (new code).** Test it on the small deck first.
