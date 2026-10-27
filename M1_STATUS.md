@@ -1,9 +1,9 @@
 # M1 status
 
 Current step: 1, Save and resume the sampled solver
-Last passed gate: 0, 03:31, commit `ffe170f` (gate recorded in the Step 0 commit on `m1`)
-Running jobs: none
-Next action: write save/load, bucket round trip, the evaluation progress callback, and their tests
+Last passed gate: 0, 03:31, commit `65bd6c3`
+Running jobs: 31994580, full test suite (Gate 1), submitted 03:45, about 20 min; 31994581, `test_holdem_river.py --runslow` (Gate 1), submitted 03:45, about 5 min
+Next action: judge Gate 1 when both jobs end; meanwhile draft `m1.py` in the scratchpad (not in the repo, which the tests read)
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -42,3 +42,18 @@ Job 31994378 on node202 (Xeon Gold 5320, 104 threads), commit `ec589c6` (after t
 - Scaling table and CPU choice: recorded above.
 - Every test passes: job 31994379 (node010, Xeon Gold 5218, 32 CPUs), `tests.sbatch --runslow`: **408 passed, none skipped**, 31 min 18 s, peak 11.1 GB. The code is `ec589c6`'s, identical to `ffe170f`. The earlier run's 4 failures (job 31993952, `af3caa7`) are gone.
 - `results/` resolves to `/n/fs/scratch/rb5709`. `results/m1/` created, 2.5 KB.
+
+### 03:45, Step 1 code committed (`2cf050f`), Gate 1 tests submitted
+- `SampledRangeCFR.save(path)` / `.load(path)` in `core/solvers/sampled_cfr.py`:
+  - One uncompressed `.npz`: every `regret`, `cum` and `sigma` array (`sigma` saved, not recomputed), `t`, `solve_seconds`, `value`, the generator's state as JSON, `batch`, `samples` and `seed`. The solver now keeps `self.seed`.
+  - Written to `<name>.tmp`, fsynced, then renamed.
+  - `load` checks the array names, shapes and dtypes before changing anything, and raises a `ValueError` naming the mismatched array.
+- `EquityBuckets.save(path)` / `EquityBuckets.load(path)` in `core/abstraction/river.py`: centers, method and k, plus `fit` metadata (`samples`, `seed`, `restarts`), which `fit_equity_buckets` now fills in. Centers and ids are unchanged.
+- `exact_exploitability(..., progress=None, progress_every=1)`: calls `progress(chunks done, total)` every N chunks and after the last. With the default `None`, behavior is unchanged.
+- `tests/holdem/test_holdem_checkpoint.py`, 10 tests, all passing locally on spin (4 min 45 s):
+  - round trip and resume, each with `Lossless` and `kmeans_2d`;
+  - evaluation from a checkpoint, the bucket side going through save and load too;
+  - bucket round trip, for both methods;
+  - a mismatched load is refused and changes nothing;
+  - progress callback.
+- Jobs: 31994580 runs the full suite. 31994581 runs `test_holdem_river.py --runslow`, needed because `exact_exploitability` changed.
