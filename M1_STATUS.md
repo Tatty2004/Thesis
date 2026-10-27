@@ -2,8 +2,8 @@
 
 Current step: 6, Exact checks of the 2 h checkpoints (authorized by the user 10:27)
 Last passed gate: 5 (both methods), 10:20; avg_1d's speed check accepted by the user at 10:24, commit `dac4d85`
-Running jobs: long solve 31994844 (m1_kmeans2d, node202) and 31994845 (m1_avg1d, node204), started 08:12, budget ends 2026-10-30 07:36; exact checks 31995076 (kmeans_2d t 1008, node203) and 31995077 (avg_1d t 1564, node206), started 10:28, expected to end about 2026-10-28 08:00 (walltime 1-08:15)
-Next action: Gate 6 when the exact checks finish (about 2026-10-28 08:00); push `m1`
+Running jobs: long solve 31994844 (m1_kmeans2d, node202) and 31994845 (m1_avg1d, node204), started 08:12, budget ends 2026-10-30 07:36; exact checks 31995076 (kmeans_2d t 1008, node203) and 31995077 (avg_1d t 1564, node206), started 10:28; projected ends: avg_1d about 20:50 today (2.44 s per chunk, 10.4 h), kmeans_2d about 2026-10-28 08:45 (5.24 s per chunk, 22.3 h) (walltime 1-08:15)
+Next action: Gate 6 when each exact check finishes (avg_1d about 20:50 today, kmeans_2d about 2026-10-28 08:45); push `m1`
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -309,3 +309,4 @@ Code changed after Gate 4: only `budget_hours` 71.5 → 71.4 in the two real-dec
 - 31995077: the same, `-w node206`, `--checkpoint results/m1/m1_avg1d/keep/ckpt_t000001564.npz`
 - Both on Gold 5320 (the pilot's timing type), from clean `96a9fc9`. Walltime 1.5 × the 21.5 h projection; memory 2 × the timing run's 9.7 GB. `eval.json` lands next to each checkpoint in `keep/`.
 - node206 is accepted by `-w` now (Step 3 had node208 and node302 refused).
+- First progress, 10:32: kmeans_2d 5.24 s per chunk (the pilot timing run measured 5.05), projected 22.3 h; avg_1d 2.44 s per chunk, projected 10.4 h (its 1D bucket lookup is cheaper, as in the solve). Both well inside the 32.25 h walltime.
