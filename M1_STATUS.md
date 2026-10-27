@@ -1,9 +1,9 @@
 # M1 status
 
-Current step: 3, Fit the real-deck buckets
-Last passed gate: 2, 05:02, commit `f27de52` (code), status `1442a1c`+
-Running jobs: fits 31994725 (kmeans_2d, node204, submitted 05:01, about 1.3 h, ends about 06:25) (31994726, avg_1d, finished 05:15)
-Next action: submit Step 3's two fits, then judge Gate 3 from fit_checks.json
+Current step: 4, Real-deck pilot
+Last passed gate: 3, 06:18, commit `af52b9b` (code, both fits)
+Running jobs: none
+Next action: Step 4: fetch and merge main, then submit the pilot
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -134,3 +134,19 @@ Job 31994726, node204 (Gold 5320), COMPLETED in 14 min: 36 s to build, 519 s to 
 - Ids well formed at 5 turn deals × 5 rivers: PASS.
 - `meta.json`: git `af52b9b`, dirty false.
 - **Occupancy (reported, not judged):** over 25 river deals with 861 possible hands each: min 0, median 0, max 102 hands per bucket; **64% of the 200 buckets are empty at a given river deal.** The centers are fitted per turn deal on 50 sampled rivers, so at any one river most 1D centers get no hands. Odd enough to flag, but the procedure says report only. kmeans_2d's numbers will show whether this is particular to 1D.
+
+### 06:18, Gate 3: PASS (both methods)
+kmeans_2d: job 31994725, node204, COMPLETED in 1 h 15 min: 4,148 s to fit (2.00 s per turn deal), peak 0.34 GB (MaxRSS 0.44 GB).
+
+| Check | kmeans_2d | avg_1d |
+|---|---|---|
+| Shape | (2070, 200, 2) | (2070, 200, 1) |
+| Finite, in [0, 1], weakest first | PASS | PASS |
+| Refits of turn deals 0, 1035, 2069, and 0 from the seed | identical | identical |
+| Ids at 5 turn deals × 5 rivers (0..199 for possible hands, 200 otherwise) | PASS | PASS |
+| `meta.json` git | `af52b9b`, clean | `af52b9b`, clean |
+| Occupancy (hands per bucket, 25 river deals, 861 hands each): min / median / max | 0 / 0 / 108 | 0 / 0 / 102 |
+| Buckets empty at a given river deal | 73.5% | 64.1% |
+
+- **Occupancy, reported not judged:** both methods leave most of their 200 buckets empty at any one river deal. On average 861 hands share about 53 (kmeans_2d) or 72 (avg_1d) occupied buckets. The centers are fitted per turn deal over 50 sampled rivers, and one river concentrates the hands' equities, so this may be expected. It does mean the effective number of river buckets per deal is far below 200. **Worth the user's look before reading much into k = 200.**
+- Disk: `results/m1` 1.6 GB (the buckets are small).
