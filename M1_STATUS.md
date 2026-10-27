@@ -210,3 +210,8 @@ Gates 0–4 all passed and the pilot is inside rule 7, so per the user's instruc
 - **Expected disk:** each solve keeps at most 2 newest + 6 milestone checkpoints × 6.6 GiB ≈ 53 GiB, about 106 GiB for both, plus 34 GB already there. Under 300 GB.
 - If one reaches its walltime: resubmit once with `--resume`. (Expected about 2026-10-30 07:00, after this session.)
 - avg_1d hasn't been piloted itself. Its arrays are the same shape (k = 200), so it's judged against the pilot's 7.15 s/it.
+
+### 08:13, Step 5: both solves refused to start (diagnosed, fixed, resubmitted)
+- 31994837 and 31994838 exited at once: "budget ends 07:00:51, the job's walltime 2026-10-30 07:30:48: 30 min apart / the time budget must end at least 30 min before the walltime". The guard (written tonight) counts the budget from process start, 3 s after the job started, so a 71.5 h budget in a 72 h job leaves 29 min 57 s. The configs' 71.5 was a mistake written tonight, not a solver problem. No checkpoints were written.
+- I noticed only at 08:11: my watcher waited for an iteration line and didn't stop when the jobs left the queue. About 40 minutes lost. Later watchers also stop when the job leaves the queue.
+- **Fix:** `budget_hours: 71.4` in `m1_kmeans2d.yaml` and `m1_avg1d.yaml` (stops 36 min before the walltime). Nothing else changed. `test_m1.py`: 5 passed. `keep_config` compares only game and buckets, so the run folders accept it.

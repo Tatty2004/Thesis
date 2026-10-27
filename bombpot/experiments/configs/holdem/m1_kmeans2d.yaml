@@ -14,7 +14,7 @@ game:
 buckets: {method: kmeans_2d, k: 200, samples: 50, seed: 0, restarts: 3}
 solver: {batch: 64, samples: 4, seed: 0}
 run:
-  budget_hours: 71.5          # a 3-day job (--time=3-00:00:00), stopping 30 minutes before its walltime
+  budget_hours: 71.4          # a 3-day job (--time=3-00:00:00), stopping 36 minutes before its walltime (m1.py requires >= 30)
   checkpoint_hours: 2
   log_minutes: 5
   milestone_hours: [2, 4, 8, 16, 32, 64]
