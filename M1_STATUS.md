@@ -2,8 +2,8 @@
 
 Current step: 4, Real-deck pilot
 Last passed gate: 3, 06:18, commit `af52b9b` (code, both fits)
-Running jobs (submitted 06:17): main pilot 31994796 (node202, ends about 07:10, incl. resume check); timing chain on node204 31994797 → 31994798 → 31994799 → 31994800 (about 20 min each, ends about 07:40)
-Next action: when 31994796 ends, submit the exact-check timing (m1_eval, --max-minutes 20) on its newest checkpoint; judge Gate 4 when all are done
+Running jobs: timing 31994800 (b256-t64, node204, ends about 07:20); exact-check timing 31994814 (node202, `--max-minutes 20`, submitted 07:04, ends about 07:30)
+Next action: when both end, choose batch and threads, then judge Gate 4
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -163,3 +163,24 @@ kmeans_2d: job 31994725, node204, COMPLETED in 1 h 15 min: 4,148 s to fit (2.00 
     - 31994799 `THREADS=32 --batch 256 --tag pilot-b256-t32`
     - 31994800 `THREADS=64 --batch 256 --tag pilot-b256-t64`
 - At most 2 solve jobs run at once.
+
+### 07:05, Step 4: main pilot done, timing runs 1–3 done
+- **Main pilot 31994796** (node202, b64, 32 threads), COMPLETED in 46 min:
+  - 367 iterations at **7.151 s/it** after the first (14.1 s with compiling), 35.8 river deals/s.
+  - Peak: 9.89 GB in the solve (log), 16.50 GB during the resume check, which holds two solvers. **sacct MaxRSS 24.2 GB**, higher than both. I size `--mem` from sacct's number.
+  - Checkpoints: t 125, 251, 367, each **6.61 GiB** (7,094,668,434 bytes), saved in 17.9 / 12.3 / 12.2 s.
+  - Health checks: 3 of 3 PASS (max row-sum error 4.4e-16).
+  - Retention: kept t 251 and 367 (newest 2; no milestone yet), deleted t 125. That's the rule.
+  - **Real-deck resume check (2 iterations resumed from t 367 vs 2 uninterrupted): PASS**, with regret, cum, sigma, t and generator all bit-identical.
+  - Player 0's flop bet frequency (overall) by checkpoint: 0.72 → 0.46 → 0.31. Per hand at t 367: KcKh 0.17, AcAd 0.17, 7d7h 0.42, 9c9d 0.20, 5s6s 0.30, 3c4d 0.16. It's still moving a lot this early.
+- **Timing runs** (node204, 15 min each):
+
+| Job | Batch | Threads | s/it | River deals/s | Peak (log) | MaxRSS |
+|---|---:|---:|---:|---:|---:|---:|
+| 31994797 | 64 | 64 | 7.124 | 35.9 | 9.82 GB | see below |
+| 31994798 | 64 | 32 | 7.192 | 35.6 | 9.80 GB | |
+| 31994799 | 256 | 32 | 28.418 | 36.0 | 18.60 GB | |
+| 31994800 | 256 | 64 | running | | | |
+| 31994796 (node202) | 64 | 32 | 7.151 | 35.8 | 9.89 GB | 24.2 GB |
+
+- Exact-check timing 31994814 submitted 07:04: `THREADS=32 sbatch -w node202 --time=00:40:00 --mem=32G m1_eval.sbatch --checkpoint results/m1/m1_kmeans2d/solve-pilot/ckpt_t000000367.npz --max-minutes 20`.
