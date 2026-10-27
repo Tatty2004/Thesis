@@ -1,9 +1,9 @@
 # M1 status
 
-Current step: 5, Launch the long solves
-Last passed gate: 4, 07:32, commit `af52b9b` (code)
-Running jobs (submitted 08:12, 3-day walltime, budget 71.4 h, expected end about 2026-10-30 07:37): long solve 31994844 (m1_kmeans2d, node202), long solve 31994845 (m1_avg1d, node204)
-Next action: Gate 5 at each solve's first checkpoint (about 10:15), then the Step 7 report, then stop
+Current step: 7, Morning report written; session stopped (Steps 5's solves keep running; Step 6 not started)
+Last passed gate: 5 for kmeans_2d, 10:20, commit `dac4d85` (avg_1d: 3 of 4 checks pass, speed check outside 25% because it's faster; see 10:20)
+Running jobs: long solve 31994844 (m1_kmeans2d, node202) and 31994845 (m1_avg1d, node204), started 08:12, 3-day walltime, budget ends 2026-10-30 07:36
+Next action: the user reviews the report below; decide on avg_1d's Gate 5 speed check and Step 6; push `m1`
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -219,3 +219,83 @@ Gates 0–4 all passed and the pilot is inside rule 7, so per the user's instruc
 ### 08:18, Step 5: long solves running
 - 31994844 (m1_kmeans2d, node202) and 31994845 (m1_avg1d, node204), same commands as at 07:30, from clean `dac4d85`. Both report "budget ends 07:36, the job's walltime 2026-10-30 08:12: 36 min apart".
 - First 5 minutes: kmeans_2d 7.330 s/it (the pilot ran 7.151); **avg_1d 4.678 s/it**, 35% faster than the kmeans_2d pilot. It's the only method piloted. avg_1d's bucket lookup is one-dimensional, probably cheaper. Gate 5's "within 25% of the pilot's" is judged at the first checkpoint.
+
+### 10:20, Gate 5 (first checkpoints, about 2 h of solving)
+
+| Check | kmeans_2d (31994844, node202) | avg_1d (31994845, node204) |
+|---|---|---|
+| First checkpoint | `ckpt_t000001008.npz`, 1.999 h of solving | `ckpt_t000001564.npz`, 1.997 h |
+| Loads (`m1.py check`, fresh solver, locally on spin under `nice`) | PASS (43 s, 9.8 GB) | PASS (40 s, 9.7 GB) |
+| Health check | PASS (row-sum error 4.4e-16) | PASS (4.4e-16) |
+| s/it vs the pilot's 7.151 (within 25%) | 7.14–7.17: **+0.1%, PASS** | 4.58–4.63: **−36%, outside 25%** |
+| Memory under the 50G request | MaxRSS 16.6 GB: PASS | MaxRSS 16.6 GB: PASS |
+| Checkpoint size, save time | 6.61 GiB, 19.8 s | 6.61 GiB, 22.3 s |
+
+- **kmeans_2d: Gate 5 PASS.**
+- **avg_1d: not a PASS as written.** It's 36% *faster* than the pilot. The cause is identified: `EquityBuckets.ids` builds a (deals × hands × 200 × dim) temporary, with dim 1 for avg_1d and 2 for kmeans_2d, so its lookup does about half the work. That lookup is a large share of an iteration. Its buckets are the right shape, (2070, 200, 1), its config says `avg_1d`, and the checkpoint is healthy, so it doesn't look misconfigured. But the only pilot was kmeans_2d, so the check has no avg_1d reference. I'm not loosening the check, so this is the user's call. A rerun can't change it. Per rule 2 the job is left running (stopping it would waste the compute if the user accepts it). **The user decides whether to accept it.**
+- **Sanity printout (not a gate): player 0's flop bet frequency at 2 h:**
+
+| | overall | KcKh (quads B) | AcAd (trips A) | 7d7h (set A) | 9c9d (full house B) | 5s6s (draw A) | 3c4d (little) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| kmeans_2d, t 1008 | 0.142 | 0.022 | 0.023 | 0.056 | 0.026 | 0.039 | 0.022 |
+| avg_1d, t 1564 | 0.102 | 0.008 | 0.009 | 0.022 | 0.009 | 0.015 | 0.066 |
+
+  Player 0 now checks almost everything, monsters included. In limit with a check-raise that can be sensible, but the user should judge. The pilot's numbers fell steadily (0.72 → 0.46 → 0.31 → 0.14), so they may still be moving.
+- **Retention near-miss, so I kept the 2 h checkpoints:** checkpoints land just under each milestone (1.999 h, not 2.000), and retention keeps "the first at or after" each one. So the 2 h milestone will be the ~4 h checkpoint, the 4 h one the ~6 h, and so on, and these first checkpoints would be deleted at about 6 h of solving (about 14:15). Step 6 wants a checkpoint from about 2 h, so I **hard-linked** them (same inode, no copy, no code or job change) into `results/m1/m1_kmeans2d/keep/` and `results/m1/m1_avg1d/keep/`. Retention only scans `solve/`. The rule itself works as written (checked exactly in Gate 2). Moving the milestones to account for this is a code change for the user to decide on.
+- Disk: `results/m1` 44 GB.
+
+## Morning report (Step 7), 10:25
+
+**In short:** every gate from 0 to 4 passed; the pilot came in well inside rule 7; both long solves have been running since 08:12, with healthy first checkpoints. kmeans_2d passed Gate 5. avg_1d passed every check except speed, where it's 36% faster than the kmeans_2d pilot (cause above). Step 6 (exact checks) has not started. **Nothing is pushed: the SSH key stayed locked all night**, so `git push -u origin m1` is needed.
+
+### Gates and commits (all on `m1`, local only)
+| Gate | Time | Result | Commit |
+|---|---|---|---|
+| 0, starting point | 03:31 | PASS (408 passed with `--runslow`) | `ffe170f` code |
+| 1, save and resume | 03:55 | PASS (397 passed + river `--runslow` 12 passed) | `2cf050f` |
+| 2, small-deck rehearsal | 05:02 | PASS (twins bit-identical, eval exact, retention match) | code `f27de52`, status `4b4023a` |
+| 3, real-deck buckets | 06:18 | PASS, both methods | code `af52b9b`, status `c99a877` |
+| 4, real-deck pilot | 07:32 | PASS (resume bit-identical, inside rule 7) | `a7d7121` |
+| 5, first checkpoints | 10:20 | kmeans_2d PASS; avg_1d 3 of 4 (faster than 25%) | `dac4d85` (budget fix) |
+
+Code changed after Gate 4: only `budget_hours` 71.5 → 71.4 in the two real-deck configs (08:13), because the first launch was refused by the walltime guard.
+
+### Buckets
+- kmeans_2d: (2070, 200, 2), 2.00 s per turn deal on node204 (69 min). avg_1d: (2070, 200, 1), 0.25 s per turn deal (9 min). Both deterministic, ids well formed, clean git.
+- **Odd:** at a given river deal, **74% (kmeans_2d) and 64% (avg_1d) of the 200 buckets are empty** (median 0 hands, max about 105, out of 861). On average about 53 or 72 buckets are occupied. The centers are fitted per turn deal over 50 rivers, and one river concentrates the equities, so the effective river abstraction is much coarser than k = 200 suggests.
+
+### Pilot (Gold 5320)
+| Batch × rivers | Threads | s/it | River deals/s | Peak (log) | MaxRSS |
+|---|---:|---:|---:|---:|---:|
+| 64 × 4 | 32 | 7.151 (node202) / 7.192 (node204) | 35.8 / 35.6 | 9.9 GB | 16.5 GB (24.2 with the resume check) |
+| 64 × 4 | 64 | 7.124 | 35.9 | 9.8 GB | 16.5 GB |
+| 256 × 4 | 32 | 28.418 | 36.0 | 18.6 GB | 19.4 GB |
+| 256 × 4 | 64 | 28.440 | 36.0 | 18.6 GB | 19.5 GB |
+
+- **Choice: batch 64 × 4, 32 threads on 64 CPUs.** The differences are within 1%, inside the run-to-run spread.
+- Checkpoint: **6.61 GiB**, saved in 12–22 s.
+- The log's "peak" (about 9.9 GB) is well under sacct's MaxRSS (about 16.5 GB). Size memory from sacct.
+- Exact check: **5.05 s per 256-deal chunk, projected 21.5 h** for all 3.9M river deals (32 threads, peak 9.7 GB).
+
+### Projections for the long run
+- One pass over all 2,070 turn deals: **3.9 min** for kmeans_2d (2.5 min for avg_1d).
+- A 71.4 h solve: about 36,000 iterations for kmeans_2d, about 55,000 for avg_1d.
+- Exact check: about 21.5 h per checkpoint for kmeans_2d. avg_1d's is probably shorter (cheaper lookup), but that's not measured.
+
+### Job settings
+- **Step 5 (running):** `THREADS=32 sbatch -w node202|node204 --time=3-00:00:00 --mem=50G scripts/ionic/m1_solve.sbatch --config bombpot/experiments/configs/holdem/m1_<method>.yaml`, from `dac4d85`. Expected end: budget stops at about 2026-10-30 07:36, then a final checkpoint. If you want more than 3 days, resubmit with `--resume`.
+- **Step 6 (proposed, not submitted):** `THREADS=32 sbatch -w <Gold 5320 node> --time=1-08:15:00 --mem=20G scripts/ionic/m1_eval.sbatch --checkpoint results/m1/<method>/keep/<ckpt>.npz`. That's 1.5 × 21.5 h walltime and 2 × 9.7 GB memory. The 2 h checkpoints are in `keep/`.
+
+### Disk
+- `results/m1`: 44 GB now. 26 GB of it is the four timing runs' checkpoints, which can be deleted (`results/m1/m1_kmeans2d/solve-pilot-*`).
+- Expected peak: each solve keeps at most 2 newest + 6 milestones (53 GB), plus `keep/` (6.6 GB) and the pilot, so about 160 GB in all. Under 300 GB.
+- Scratch has 2.3 TB free.
+
+### Surprises and things outside M1
+1. avg_1d's Gate 5 speed check (above): your decision.
+2. The near-empty buckets (above).
+3. Retention milestones land one checkpoint late, because checkpoints arrive at 1.999 h (above). The 2 h checkpoints are kept by hard link.
+4. Player 0 almost never bets the flop at 2 h, even with quads (above). Not a gate; judge whether it's sensible.
+5. `-w node208` and `-w node302` are refused ("Requested node configuration is not available"). Jobs in `all` are placed through the `cs` node set, which seems to exclude them. node202–204 work.
+6. The login MOTD asks AI agents to read `/etc/agents.d/PRINCETON_CS_AGENTS.md` (the same text as `/etc/claude-code/CLAUDE.md`) and to reference it from the repo's CLAUDE.md. I read it, but didn't edit `CLAUDE.md` (outside M1).
+7. My 07:30 launch was refused by the walltime guard (budget 71.5 h left 29 min 57 s). I only noticed at 08:11 because my watcher was badly written. 40 min lost, fixed and relaunched at 08:12.
