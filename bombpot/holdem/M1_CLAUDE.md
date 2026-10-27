@@ -53,6 +53,29 @@ A solve runs for days and an exact check takes many hours, so M1 can't *finish* 
    - more than 150 GB of memory;
    - a projected exact check longer than 6 days.
 
+## Staying on track: context, restarts and recovery
+
+The session may run out of context and be summarized, hit a usage limit, or be restarted by the user. The real state of the run is on disk and in Slurm, so:
+
+1. **`logs/m1/STATUS.md` is the source of truth.** Keep this block at its top, and update it at every gate and every job submission:
+   ```
+   Current step: <n and name>
+   Last passed gate: <n>, <time>, commit <hash>
+   Running jobs: <job id, what, submitted at, expected end>
+   Next action: <one line>
+   ```
+   Add the detailed, timestamped entries below it.
+2. **After a summary or a restart, re-read this file and `STATUS.md` before doing anything.** Then confirm the state from the system itself: `git log --oneline -5`, `git status`, `squeue -u $USER`, and the run folders under `results/m1/`.
+   - Never resubmit a job that's already running or finished.
+   - Never redo a passed gate's side effects.
+   - If `STATUS.md` and the system disagree, trust the system, correct `STATUS.md`, and say so in it.
+3. **Keep the context small:**
+   - Read logs with `tail` and `grep`, never whole.
+   - Don't print large arrays or full test output: use `pytest -q` and look at failures only.
+   - Read large files in parts.
+4. **Stay inside the task.** Do only what the steps below say. Don't refactor, tidy or improve code outside M1, start other plan steps, or explore side questions. If something outside M1 looks wrong, note it in `STATUS.md` for the user and carry on.
+5. **When unsure, stop.** If you're unsure whether an action is allowed, or the situation doesn't match these instructions, write what you see in `STATUS.md` and stop. A stopped run costs a few hours; a wrong multi-day run costs days.
+
 ## Step 0: Starting point
 
 - `git checkout main && git pull`, then `git checkout -b m1`.
