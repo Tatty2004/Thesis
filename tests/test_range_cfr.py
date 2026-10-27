@@ -53,7 +53,9 @@ def built(name):
 # hand that can neither win nor lose): there one solver computes 0 and the other 1e-19,
 # regret matching plays uniform in one and pure in the other, and the runs part ways.
 # Both are right; these games are checked in lockstep only.
-EXACT_TIES = {"board_leduc-3-1street", "board_leduc-4-independent", "holdem-4x2-2-b1"}
+# Which games hit an exact tie depends on the CPU: on x86 (Ionic), holdem-4x2-1-b2 computes a
+# regret of +-2^-63 at 8 infosets in iteration 1 where the two solvers differ only in its sign.
+EXACT_TIES = {"board_leduc-3-1street", "board_leduc-4-independent", "holdem-4x2-2-b1", "holdem-4x2-1-b2"}
 
 
 @pytest.mark.parametrize("name", [n for n in GAMES if n not in EXACT_TIES])
@@ -109,7 +111,9 @@ def test_converges_to_the_lp_value(name):
     _, tree, pt = built(name)
     (v, _), _ = solve_game(tree)
     b = RangeCFR(pt)
-    for _ in range(1500):
+    # At 1,500 iterations exploitability depends on rounding at exact ties (Leduc: 7.7e-5 on the
+    # laptop, 1.05e-4 on Ionic); by 3,000 both are below 2e-5.
+    for _ in range(3000):
         b.iteration()
     rep = b.exploitability()
     assert rep["exploitability"] < 1e-4
