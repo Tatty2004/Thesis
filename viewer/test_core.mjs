@@ -4,6 +4,7 @@
 import { createRequire } from "module";
 import fs from "fs";
 import path from "path";
+import zlib from "zlib";
 
 const core = createRequire(import.meta.url)("./core.js");
 const dir = process.argv[2];
@@ -147,6 +148,20 @@ function boardsOf(d, river) {
     const h = model.handIdx(core.parseCard("7d"), core.parseCard("7h"));
     check(Math.abs(flop.prob(0, 0, h, 0, 1) - want["7d7h"]) < 1 / 255 + 5e-5, `7d7h bets ${flop.prob(0, 0, h, 0, 1).toFixed(4)} at the flop root (solve.log: 0.0561)`);
   }
+}
+
+// The published copies (web/<name>.txt, base64 of gzip) decode to the same bytes, and meta.json is the same.
+{
+  let bad = 0, n = 0;
+  const names = ["flop"].concat(...["turn", "river", "centers"].map((k) => meta.shards.map((s) => `${k}/${s}`)));
+  for (const f of names) {
+    const raw = fs.readFileSync(path.join(dir, `${f}.bin`));
+    const packed = zlib.gunzipSync(Buffer.from(fs.readFileSync(path.join(dir, "web", `${f}.txt`), "utf8"), "base64"));
+    n++;
+    if (!raw.equals(packed)) bad++;
+  }
+  const sameMeta = fs.readFileSync(path.join(dir, "meta.json")).equals(fs.readFileSync(path.join(dir, "web", "meta.json")));
+  check(bad === 0 && sameMeta, `published copies: ${n - bad}/${n} files decode to their .bin bytes, meta.json identical: ${sameMeta}`);
 }
 
 console.log(failed ? `${failed} check(s) failed` : "all checks passed");

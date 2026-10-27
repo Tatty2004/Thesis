@@ -1,0 +1,679 @@
+<title>M1 Strategy Viewer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: a solver workbench. Boards and the action path across the top, the 13x13 hand grid
+   on the left, the node's actions, summary and combo inspector beside it; one column on phones. */
+:root {
+  --bg: #eef1f4;
+  --surface: #ffffff;
+  --sunk: #e3e8ee;
+  --line: #cfd6df;
+  --ink: #18212b;
+  --muted: #5d6b7a;
+  --accent: #2e5d8a;
+  --card: #fbfcfd;
+  --suit-s: #1d2630;
+  --suit-h: #c4302b;
+  --suit-d: #1f63c6;
+  --suit-c: #23864a;
+  --act-fold: #5f8bb8;
+  --act-check: #3c9a68;
+  --act-call: #3c9a68;
+  --act-bet: #e08a2c;
+  --act-raise: #c63c3c;
+  --range: #6c7f95;
+  --blocked: #d8dde3;
+  --focus: #2e5d8a;
+  --warn-bg: #fff4e0;
+  --warn-ink: #7a4b00;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12171d; --surface: #1a2129; --sunk: #232c36; --line: #333f4c; --ink: #e6ebf0; --muted: #98a6b5;
+    --accent: #7fb0e0; --card: #f1f3f5; --suit-s: #1d2630; --suit-h: #c4302b; --suit-d: #1f63c6; --suit-c: #23864a;
+    --act-fold: #6f9bcb; --act-check: #4fb37e; --act-call: #4fb37e; --act-bet: #eb9a3f; --act-raise: #dd5a52;
+    --range: #8296ad; --blocked: #2a333d; --focus: #7fb0e0; --warn-bg: #3a2c12; --warn-ink: #f2cf8f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12171d; --surface: #1a2129; --sunk: #232c36; --line: #333f4c; --ink: #e6ebf0; --muted: #98a6b5;
+  --accent: #7fb0e0; --card: #f1f3f5; --suit-s: #1d2630; --suit-h: #c4302b; --suit-d: #1f63c6; --suit-c: #23864a;
+  --act-fold: #6f9bcb; --act-check: #4fb37e; --act-call: #4fb37e; --act-bet: #eb9a3f; --act-raise: #dd5a52;
+  --range: #8296ad; --blocked: #2a333d; --focus: #7fb0e0; --warn-bg: #3a2c12; --warn-ink: #f2cf8f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 40px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+button { font: inherit; color: inherit; }
+button:focus-visible, .cell:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.data { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 20px; }
+h1 { font-family: var(--font-display); font-stretch: 80%; font-weight: 750; font-size: 26px; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h1 small { font-weight: 500; color: var(--muted); font-size: 15px; font-stretch: 100%; margin-left: 6px; letter-spacing: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-family: var(--font-data); font-size: 12px; padding: 3px 8px; border-radius: 4px; background: var(--sunk); color: var(--muted); }
+.chip.warn { background: var(--warn-bg); color: var(--warn-ink); }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; }
+.label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+
+/* Boards */
+.boards { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: flex-end; }
+.board { display: flex; flex-direction: column; gap: 6px; }
+.cards { display: flex; gap: 5px; align-items: center; }
+.cards .gap { width: 6px; }
+.pc {
+  width: 40px; height: 54px; border-radius: 5px; background: var(--card); border: 1px solid #b9c2cc;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1;
+  font-family: var(--font-display); font-weight: 700; font-size: 19px; box-shadow: 0 1px 0 rgba(0,0,0,0.08);
+}
+.pc .s { font-size: 15px; margin-top: 2px; }
+.pc.s-s { color: var(--suit-s); } .pc.s-h { color: var(--suit-h); } .pc.s-d { color: var(--suit-d); } .pc.s-c { color: var(--suit-c); }
+button.slot { cursor: pointer; padding: 0; }
+.slot.empty { background: transparent; border: 1.5px dashed var(--line); color: var(--muted); font-size: 10px; font-weight: 600; font-family: var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; box-shadow: none; }
+.slot.active { outline: 2px solid var(--accent); outline-offset: 2px; }
+.slot.later { opacity: 0.55; }
+
+.picker { display: flex; flex-direction: column; gap: 8px; }
+.picker-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: baseline; }
+.picker-grid { display: grid; grid-template-columns: repeat(13, minmax(0, 1fr)); gap: 4px; max-width: 620px; }
+.pick {
+  aspect-ratio: 3 / 4; max-width: 100%; border-radius: 4px; border: 1px solid #b9c2cc; background: var(--card); cursor: pointer;
+  font-family: var(--font-display); font-weight: 700; font-size: 13px; padding: 0; line-height: 1.05;
+}
+.pick:disabled { cursor: not-allowed; opacity: 0.18; }
+.pick.s-s { color: var(--suit-s); } .pick.s-h { color: var(--suit-h); } .pick.s-d { color: var(--suit-d); } .pick.s-c { color: var(--suit-c); }
+.linkbtn { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; font-size: 13px; }
+
+/* Path */
+.path { display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; font-size: 13px; }
+.path .street { font-weight: 700; margin-left: 6px; }
+.path .street:first-child { margin-left: 0; }
+.path button.step { background: var(--sunk); border: 1px solid transparent; border-radius: 4px; padding: 2px 7px; cursor: pointer; }
+.path button.step:hover { border-color: var(--line); }
+.path .sep { color: var(--muted); }
+
+/* Main area */
+.main { display: grid; grid-template-columns: minmax(0, 600px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr); } }
+
+.grid-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { background: var(--surface); border: none; padding: 5px 10px; cursor: pointer; font-size: 12.5px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+
+.hand-grid { display: grid; grid-template-columns: repeat(13, minmax(0, 1fr)); gap: 2px; }
+.cell {
+  position: relative; aspect-ratio: 1; max-width: 100%; background: var(--sunk); border-radius: 2px; overflow: hidden; cursor: pointer;
+  border: none; padding: 0; display: block;
+}
+.cell .fill { position: absolute; left: 0; right: 0; bottom: 0; display: flex; }
+.cell .fill span { display: block; height: 100%; }
+.cell .lab {
+  position: absolute; left: 3px; top: 2px; font-family: var(--font-data); font-size: 11px; font-weight: 600; color: var(--ink);
+  text-shadow: 0 0 2px var(--surface), 0 0 2px var(--surface);
+}
+.cell.blocked { background: repeating-linear-gradient(135deg, var(--blocked) 0 4px, transparent 4px 8px); cursor: default; }
+.cell.blocked .lab { color: var(--muted); opacity: 0.6; }
+.cell.selected { outline: 2px solid var(--ink); outline-offset: -1px; z-index: 1; }
+@media (max-width: 520px) { .cell .lab { font-size: 8.5px; left: 1px; top: 1px; } }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.node-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; align-items: baseline; }
+.node-head h2 { font-family: var(--font-display); font-stretch: 85%; font-size: 19px; margin: 0; font-weight: 700; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.act {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 104px; padding: 7px 11px 8px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--surface); cursor: pointer; border-left: 5px solid var(--c);
+}
+.act:hover { background: var(--sunk); }
+.act b { font-size: 14px; }
+.act .data { font-size: 12px; color: var(--muted); }
+.bar { display: flex; height: 22px; border-radius: 4px; overflow: hidden; margin-top: 12px; background: var(--sunk); }
+.bar span { display: block; height: 100%; }
+.stats { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.notice { margin-top: 10px; padding: 9px 11px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-ink); font-size: 13px; }
+
+.insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.insp-head h3 { margin: 0; font-family: var(--font-display); font-size: 17px; font-stretch: 85%; }
+.combos { overflow-x: auto; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 5px 6px; border-bottom: 1px solid var(--sunk); white-space: nowrap; vertical-align: middle; }
+td.num { text-align: right; }
+tr.off td { color: var(--muted); }
+.mini { display: flex; width: 90px; height: 10px; border-radius: 2px; overflow: hidden; background: var(--sunk); }
+.mini span { display: block; height: 100%; }
+.combo-name { font-family: var(--font-data); font-weight: 600; }
+.combo-name .h, .combo-name .d, .combo-name .c, .combo-name .s { font-weight: 600; }
+.combo-name .h { color: var(--suit-h); } .combo-name .d { color: var(--suit-d); } .combo-name .c { color: var(--suit-c); }
+
+.notes { font-size: 13px; color: var(--muted); max-width: 75ch; }
+.notes h2 { font-family: var(--font-display); font-stretch: 85%; color: var(--ink); font-size: 16px; margin: 0 0 6px; }
+.notes ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.status { font-size: 13px; color: var(--muted); min-height: 1.2em; }
+.status.err { color: var(--act-raise); }
+@media (prefers-reduced-motion: no-preference) { .cell .fill, .bar span { transition: height 120ms ease, width 120ms ease; } }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <h1>M1 Strategy Viewer <small>double-board Hold'em bomb pot</small></h1>
+    <div class="chips" id="chips"><span class="chip">loading checkpoint…</span></div>
+  </header>
+
+  <section class="panel">
+    <div class="boards" id="boards"></div>
+    <div class="picker" id="picker" hidden style="margin-top:14px"></div>
+  </section>
+
+  <section class="panel">
+    <div class="label" style="margin-bottom:6px">Action path</div>
+    <div class="path" id="path"></div>
+  </section>
+
+  <div class="status" id="status" role="status" hidden></div>
+
+  <div class="main">
+    <section class="panel">
+      <div class="grid-head">
+        <div class="label" id="grid-title">Strategy</div>
+        <div class="seg" id="view-toggle"></div>
+      </div>
+      <div class="hand-grid" id="grid" role="grid" aria-label="Hand grid"></div>
+      <div class="legend" id="legend"></div>
+    </section>
+    <div class="side">
+      <section class="panel" id="node"></section>
+      <section class="panel" id="inspector"></section>
+    </div>
+  </div>
+
+  <section class="notes">
+    <h2>Reading this page</h2>
+    <ul>
+      <li>Every number is the solver's <strong>average strategy</strong> at this checkpoint. The solve is young and still moving, so treat it as a snapshot, not an equilibrium.</li>
+      <li>Betting is limit: a bet and one raise per street, with bets of 2 on the flop and 4 on the turn and river. Each board is worth half the pot. Labels and amounts come from the solver's own betting template.</li>
+      <li>The flops are fixed (board A Ah7c2d, board B KsKd9h). Pick the turn and river cards when the betting reaches them.</li>
+      <li>Bar height in a cell is the share of that hand class still in the shown player's range; the colors split it by action. Blocked combos (sharing a card with a board) are left out, and a fully blocked cell is hatched.</li>
+      <li>On the river the strategy is stored per equity bucket (200 per turn deal, fitted on (equity A, equity B)), so hands in one bucket play the same mix. The inspector shows each combo's bucket and equities, computed here exactly as the solver computes them.</li>
+      <li>Range weights multiply the player's own action probabilities along the path. Opponent card removal is not applied.</li>
+      <li>Probabilities are stored to 1/255 (about 0.4%), so a shown frequency can differ from the solver's by up to that much.</li>
+      <li>No EVs: checkpoints store strategies only, so there are no hand values to show.</li>
+    </ul>
+  </section>
+</div>
+
+<script src="core.js"></script>
+<script>
+(function () {
+  "use strict";
+  const C = window.ViewerCore;
+  const $ = (id) => document.getElementById(id);
+  const SUIT_GLYPH = { c: "♣", d: "♦", h: "♥", s: "♠" };
+  const KIND_VAR = { fold: "--act-fold", check: "--act-check", call: "--act-call", bet: "--act-bet", raise: "--act-raise" };
+  const STREETS = ["Flop", "Turn", "River"];
+  const SLOT_NAMES = { tA: "turn A", tB: "turn B", rA: "river A", rB: "river B" };
+
+  let model = null, flop = null;
+  const cache = new Map();   // url -> Promise of data
+  const idCache = new Map(); // "d:rA:rB" -> {eq, possible, ids}
+  const state = { turn: [null, null], river: [null, null], actions: [], view: "actor", picker: null, cell: null };
+
+  // Binary files are published as base64 of their gzip ("<name>.txt"): artifacts serve no raw binary type.
+  async function unpack(text) {
+    const s = atob(text.trim()), z = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) z[i] = s.charCodeAt(i);
+    const stream = new Blob([z]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return new Response(stream).arrayBuffer();
+  }
+
+  function load(name, kind) {
+    const url = kind === "json" ? name : name.replace(/\.bin$/, ".txt");
+    if (!cache.has(url)) {
+      cache.set(url, fetch(url).then((r) => {
+        if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+        return kind === "json" ? r.json() : r.text().then(unpack);
+      }).catch((e) => { cache.delete(url); throw e; }));
+    }
+    return cache.get(url);
+  }
+
+  function setStatus(text, err) { const s = $("status"); s.textContent = text || ""; s.hidden = !text; s.className = "status" + (err ? " err" : ""); }
+
+  function cardEl(c, cls) {
+    const s = C.cardStr(c);
+    const el = document.createElement(cls && cls.includes("slot") ? "button" : "div");
+    el.className = `pc s-${s[1]} ${cls || ""}`;
+    el.innerHTML = `<span>${s[0] === "T" ? "10" : s[0]}</span><span class="s">${SUIT_GLYPH[s[1]]}</span>`;
+    el.setAttribute("aria-label", s);
+    return el;
+  }
+
+  function comboHtml(h) {
+    const [a, b] = model.hand(h);
+    return [a, b].map((c) => { const s = C.cardStr(c); return `${s[0]}<span class="${s[1]}">${s[1]}</span>`; }).join("");
+  }
+
+  // Where the path stands, and what the spot needs before it can be shown.
+  function spot() {
+    const w = C.walk(model, state.actions);
+    const street = w.at.kind === "node" ? w.at.t : w.at.t;
+    const needTurn = street >= 1 && (state.turn[0] === null || state.turn[1] === null);
+    const needRiver = street >= 2 && (state.river[0] === null || state.river[1] === null);
+    return { ...w, street, needTurn, needRiver };
+  }
+
+  function publicCards(street) {
+    const out = model.meta.flops.flat().slice();
+    if (street >= 1) out.push(state.turn[0], state.turn[1]);
+    if (street >= 2) out.push(state.river[0], state.river[1]);
+    return out;
+  }
+
+  // Load what the spot needs; resolve to the strategy context, or null while cards are missing.
+  async function context(s) {
+    const ctx = { flop, turn: null, river: null, d: null, ids: null };
+    if (s.street === 0 || s.needTurn) return ctx;
+    const d = model.turnDeal(state.turn[0], state.turn[1]);
+    const { name } = model.shardOf(d);
+    const sh = model.enc.shapes;
+    ctx.d = d;
+    setStatus(`Loading the turn strategy for ${C.cardStr(state.turn[0])} / ${C.cardStr(state.turn[1])}…`);
+    const tb = await load(`turn/${name}.bin`, "bin");
+    ctx.turn = new C.StreetStrategy(model, new Uint8Array(tb), sh.turn[1], sh.turn[2]);
+    if (s.street < 2 || s.needRiver) { setStatus(""); return ctx; }
+    setStatus("Loading the river strategy and bucket centers…");
+    const [rb, cb] = await Promise.all([load(`river/${name}.bin`, "bin"), load(`centers/${name}.bin`, "bin")]);
+    ctx.river = new C.StreetStrategy(model, new Uint8Array(rb), sh.river[1], sh.river[2]);
+    const key = `${d}:${state.river[0]}:${state.river[1]}`;
+    if (!idCache.has(key)) {
+      const pos = d % model.enc.turn_group, n = model.meta.k * model.meta.dim;
+      const centers = new Float64Array(cb, pos * n * 8, n);
+      const boards = [model.meta.flops[0].concat([state.turn[0], state.river[0]]), model.meta.flops[1].concat([state.turn[1], state.river[1]])];
+      const { eq, possible } = C.riverEquity(model, boards, C.riverKappa(model, d));
+      idCache.set(key, { eq, possible, ids: C.bucketIds(model, eq, possible, centers) });
+    }
+    const r = idCache.get(key);
+    ctx.ids = r.ids;
+    ctx.eq = r.eq;
+    setStatus("");
+    return ctx;
+  }
+
+  // Rendering --------------------------------------------------------------------------------
+
+  function renderChips() {
+    const m = model.meta, ck = m.checkpoint;
+    const hours = (ck.solve_seconds / 3600).toFixed(2);
+    const el = $("chips");
+    el.innerHTML = "";
+    const add = (text, cls, title) => { const s = document.createElement("span"); s.className = "chip " + (cls || ""); s.textContent = text; if (title) s.title = title; el.appendChild(s); };
+    add(m.method);
+    add(`t ${ck.t.toLocaleString()}`, "", `${ck.path || ""}`);
+    add(`${hours} h solving`, "", ck.saved ? `saved ${ck.saved}` : "");
+    add("average strategy, not converged", "warn");
+  }
+
+  function renderBoards(s) {
+    const box = $("boards");
+    box.innerHTML = "";
+    const slots = [["tA", "rA"], ["tB", "rB"]];
+    ["A", "B"].forEach((name, b) => {
+      const div = document.createElement("div");
+      div.className = "board";
+      div.innerHTML = `<div class="label">Board ${name}</div>`;
+      const row = document.createElement("div");
+      row.className = "cards";
+      model.meta.flops[b].slice().sort((x, y) => y - x).forEach((c) => row.appendChild(cardEl(c)));
+      const g = document.createElement("span"); g.className = "gap"; row.appendChild(g);
+      slots[b].forEach((slot, j) => {
+        const val = (j === 0 ? state.turn : state.river)[b];
+        let el;
+        if (val === null) {
+          el = document.createElement("button");
+          el.className = "pc slot empty";
+          el.textContent = j === 0 ? "Turn" : "River";
+        } else el = cardEl(val, "slot");
+        const reached = j === 0 ? s.street >= 1 : s.street >= 2;
+        if (!reached && val === null) el.classList.add("later");
+        if (state.picker === slot) el.classList.add("active");
+        el.title = `Pick ${SLOT_NAMES[slot]}`;
+        el.setAttribute("aria-label", `${SLOT_NAMES[slot]}: ${val === null ? "not set" : C.cardStr(val)}`);
+        el.addEventListener("click", () => { state.picker = state.picker === slot ? null : slot; render(); });
+        row.appendChild(el);
+      });
+      div.appendChild(row);
+      box.appendChild(div);
+    });
+    renderPicker();
+  }
+
+  function usedExcept(slot) {
+    const used = new Set(model.meta.flops.flat());
+    const all = { tA: state.turn[0], tB: state.turn[1], rA: state.river[0], rB: state.river[1] };
+    for (const [k, v] of Object.entries(all)) if (k !== slot && v !== null) used.add(v);
+    return used;
+  }
+
+  function renderPicker() {
+    const p = $("picker");
+    if (!state.picker) { p.hidden = true; return; }
+    p.hidden = false;
+    const slot = state.picker, used = usedExcept(slot);
+    p.innerHTML = `<div class="picker-head"><span><strong>Pick ${SLOT_NAMES[slot]}</strong> <span style="color:var(--muted)">· cards on a board or already picked are disabled</span></span></div>`;
+    const grid = document.createElement("div");
+    grid.className = "picker-grid";
+    for (const suit of [3, 2, 1, 0]) {
+      for (let r = 12; r >= 0; r--) {
+        const c = r * 4 + suit, s = C.cardStr(c);
+        const b = document.createElement("button");
+        b.className = `pick s-${s[1]}`;
+        b.innerHTML = `${s[0] === "T" ? "10" : s[0]}<br>${SUIT_GLYPH[s[1]]}`;
+        b.setAttribute("aria-label", s);
+        b.disabled = used.has(c);
+        b.addEventListener("click", () => pickCard(slot, c));
+        grid.appendChild(b);
+      }
+    }
+    p.appendChild(grid);
+    const close = document.createElement("button");
+    close.className = "linkbtn";
+    close.textContent = "Close";
+    close.addEventListener("click", () => { state.picker = null; render(); });
+    p.querySelector(".picker-head").appendChild(close);
+  }
+
+  function truncateTo(street) {
+    const w = C.walk(model, state.actions);
+    const i = w.decisions.findIndex((d) => d.t >= street);
+    if (i >= 0) state.actions = state.actions.slice(0, i);
+  }
+
+  function pickCard(slot, c) {
+    if (slot[0] === "t") {
+      state.turn[slot === "tA" ? 0 : 1] = c;
+      state.river = [null, null];
+      truncateTo(1);
+    } else {
+      state.river[slot === "rA" ? 0 : 1] = c;
+      truncateTo(2);
+    }
+    const s = spot();
+    const order = s.street >= 2 ? ["tA", "tB", "rA", "rB"] : ["tA", "tB"];
+    const vals = { tA: state.turn[0], tB: state.turn[1], rA: state.river[0], rB: state.river[1] };
+    state.picker = order.find((k) => vals[k] === null) || null;
+    render();
+  }
+
+  function renderPath(s) {
+    const el = $("path");
+    el.innerHTML = "";
+    const root = document.createElement("button");
+    root.className = "step";
+    root.textContent = "Start";
+    root.addEventListener("click", () => { state.actions = []; render(); });
+    el.appendChild(root);
+    let street = -1;
+    s.decisions.forEach((d, i) => {
+      if (d.t !== street) {
+        street = d.t;
+        const lab = document.createElement("span");
+        lab.className = "street";
+        lab.textContent = STREETS[d.t] + ":";
+        el.appendChild(lab);
+      } else {
+        const sep = document.createElement("span"); sep.className = "sep"; sep.textContent = "·"; el.appendChild(sep);
+      }
+      const b = document.createElement("button");
+      b.className = "step";
+      b.textContent = `P${d.player} ${C.actionLabel(model, d.t, d.k, d.a).text.toLowerCase()}`;
+      b.title = "Go back to this decision";
+      b.addEventListener("click", () => { state.actions = state.actions.slice(0, i); render(); });
+      el.appendChild(b);
+    });
+    if (s.at.kind === "node" && s.at.t !== street) {
+      const lab = document.createElement("span"); lab.className = "street"; lab.textContent = STREETS[s.at.t] + ":"; el.appendChild(lab);
+    }
+    const now = document.createElement("span");
+    now.style.color = "var(--muted)";
+    now.textContent = s.at.kind === "node" ? ` P${model.templates[s.at.t].players[s.at.k]} to act` : s.at.kind === "fold" ? " hand over" : " showdown";
+    el.appendChild(now);
+  }
+
+  function potAt(s) {
+    const m = model.meta;
+    if (s.at.kind === "node") {
+      const chips = C.streetChips(model, s.at.t, model.templates[s.at.t].hist[s.at.k]);
+      return 2 * m.contrib[s.at.t][s.at.line] + chips[0] + chips[1];
+    }
+    const last = s.decisions[s.decisions.length - 1];
+    const tp = model.templates[last.t];
+    const chips = C.streetChips(model, last.t, tp.hist[last.k] + tp.actions[last.k][last.a]);
+    return 2 * m.contrib[last.t][last.line] + chips[0] + chips[1];
+  }
+
+  function colorOf(kind) { return `var(${KIND_VAR[kind]})`; }
+
+  function renderAll(s, ctx) {
+    const H = model.H;
+    const atNode = s.at.kind === "node";
+    const t = s.street, k = atNode ? s.at.k : null;
+    const actor = atNode ? model.templates[t].players[k] : null;
+    const possible = model.possible(publicCards(t));
+    // Which player's range the grid shows, and whether it shows that player's mix.
+    let player, showMix;
+    if (atNode) { player = state.view === "actor" ? actor : 1 - actor; showMix = state.view === "actor"; }
+    else { player = state.view === "p1" ? 1 : 0; showMix = false; }
+    const weights = C.rangeWeights(model, ctx, s.decisions, player, possible);
+    const A = atNode ? model.A[k] : 1;
+    const labels = atNode ? model.templates[t].actions[k].map((_, a) => C.actionLabel(model, t, k, a)) : [];
+    const mixes = atNode ? C.nodeMixes(model, ctx, t, k, s.at.line) : null;
+    const g = C.grid(model, possible, weights, showMix ? mixes : null, A);
+    const actorGrid = atNode && !showMix ? C.grid(model, possible, C.rangeWeights(model, ctx, s.decisions, actor, possible), mixes, A) : null;
+    const summary = showMix ? g : actorGrid;
+
+    // View toggle
+    const vt = $("view-toggle");
+    vt.innerHTML = "";
+    const opts = atNode ? [["actor", `P${actor} strategy`], ["opp", `P${1 - actor} range`]] : [["p0", "P0 range"], ["p1", "P1 range"]];
+    if (!opts.some(([v]) => v === state.view)) state.view = opts[0][0];
+    for (const [v, text] of opts) {
+      const b = document.createElement("button");
+      b.textContent = text;
+      b.setAttribute("aria-pressed", String(state.view === v));
+      b.addEventListener("click", () => { state.view = v; render(); });
+      vt.appendChild(b);
+    }
+    $("grid-title").textContent = showMix ? `P${player} strategy · ${STREETS[t].toLowerCase()}` : `P${player} range · ${STREETS[t].toLowerCase()}`;
+
+    // Grid
+    const gridEl = $("grid");
+    gridEl.innerHTML = "";
+    if (state.cell === null) state.cell = 0;
+    g.cells.forEach((cell, i) => {
+      const b = document.createElement("button");
+      b.className = "cell";
+      b.setAttribute("aria-label", `${cell.label}: ${cell.possible ? `${(100 * cell.weight / cell.possible).toFixed(0)}% in range` : "blocked"}`);
+      if (!cell.possible) b.classList.add("blocked");
+      if (i === state.cell) b.classList.add("selected");
+      const share = cell.possible ? cell.weight / cell.possible : 0;
+      if (share > 0) {
+        const fill = document.createElement("div");
+        fill.className = "fill";
+        fill.style.height = `${(100 * share).toFixed(2)}%`;
+        if (showMix) {
+          for (let a = 0; a < A; a++) {
+            if (cell.mix[a] <= 0) continue;
+            const sp = document.createElement("span");
+            sp.style.width = `${(100 * cell.mix[a]).toFixed(3)}%`;
+            sp.style.background = colorOf(labels[a].kind);
+            fill.appendChild(sp);
+          }
+        } else {
+          const sp = document.createElement("span"); sp.style.width = "100%"; sp.style.background = "var(--range)"; fill.appendChild(sp);
+        }
+        b.appendChild(fill);
+      }
+      const lab = document.createElement("span"); lab.className = "lab"; lab.textContent = cell.label; b.appendChild(lab);
+      b.addEventListener("click", () => { state.cell = i; render(); });
+      gridEl.appendChild(b);
+    });
+
+    // Legend
+    const lg = $("legend");
+    lg.innerHTML = "";
+    if (showMix) labels.forEach((l) => { const s2 = document.createElement("span"); s2.innerHTML = `<i class="sw" style="background:${colorOf(l.kind)}"></i>${l.text}`; lg.appendChild(s2); });
+    else { const s2 = document.createElement("span"); s2.innerHTML = `<i class="sw" style="background:var(--range)"></i>share of the class in P${player}'s range`; lg.appendChild(s2); }
+    const hint = document.createElement("span"); hint.textContent = "bar height = share of the class still in range"; lg.appendChild(hint);
+
+    renderNode(s, atNode, actor, labels, summary, A, g, player);
+    renderInspector(s, ctx, g.cells[state.cell], possible, weights, mixes, labels, A, showMix, player, atNode);
+  }
+
+  function renderNode(s, atNode, actor, labels, summary, A, g, player) {
+    const el = $("node");
+    const pot = potAt(s);
+    if (!atNode) {
+      const msg = s.at.kind === "fold" ? `P${s.at.folder} folds. P${1 - s.at.folder} wins the pot of ${C.fmt(pot)}.`
+        : `Showdown for a pot of ${C.fmt(pot)}, half on each board.`;
+      el.innerHTML = `<div class="node-head"><h2>Hand over</h2><span class="data">pot ${C.fmt(pot)}</span></div><p style="margin:8px 0 0">${msg} Go back with the action path, or start again.</p>
+        <div class="stats"><span>P${player} range: <span class="data">${g.inRange.toFixed(1)}</span> of ${g.combos} combos</span></div>`;
+      return;
+    }
+    const t = s.at.t, k = s.at.k;
+    const chips = C.streetChips(model, t, model.templates[t].hist[k]);
+    const owe = Math.max(chips[0], chips[1]) - chips[actor];
+    el.innerHTML = `<div class="node-head"><h2>${STREETS[t]} · P${actor} to act</h2><span class="data">pot ${C.fmt(pot)}${owe > 0 ? ` · to call ${C.fmt(owe)}` : ""}</span></div>`;
+    if (s.needTurn || s.needRiver) {
+      el.innerHTML += `<div class="notice">Pick the ${s.needTurn ? "turn" : "river"} card for each board to see the ${STREETS[t].toLowerCase()} strategy.</div>`;
+      return;
+    }
+    const acts = document.createElement("div");
+    acts.className = "actions";
+    labels.forEach((l, a) => {
+      const b = document.createElement("button");
+      b.className = "act";
+      b.style.setProperty("--c", colorOf(l.kind));
+      b.innerHTML = `<b>${l.text}</b><span class="data">${(100 * summary.summary[a]).toFixed(1)}%</span>`;
+      b.addEventListener("click", () => { state.actions.push(a); render(); });
+      acts.appendChild(b);
+    });
+    el.appendChild(acts);
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    labels.forEach((l, a) => { const sp = document.createElement("span"); sp.style.width = `${100 * summary.summary[a]}%`; sp.style.background = colorOf(l.kind); sp.title = `${l.text} ${(100 * summary.summary[a]).toFixed(1)}%`; bar.appendChild(sp); });
+    el.appendChild(bar);
+    const st = document.createElement("div");
+    st.className = "stats";
+    st.innerHTML = `<span>P${actor} range: <span class="data">${summary.inRange.toFixed(1)}</span> of ${summary.combos} combos</span><span>frequencies weighted by P${actor}'s range</span>`;
+    el.appendChild(st);
+  }
+
+  function renderInspector(s, ctx, cell, possible, weights, mixes, labels, A, showMix, player, atNode) {
+    const el = $("inspector");
+    const t = s.street, river = t === 2 && ctx.ids;
+    const share = cell.possible ? cell.weight / cell.possible : 0;
+    let html = `<div class="insp-head"><h3>${cell.label}</h3><span class="data" style="color:var(--muted)">${cell.possible} of ${cell.hands.length} combos live · ${(100 * share).toFixed(1)}% in P${player}'s range</span></div>`;
+    html += `<div class="combos"><table><thead><tr><th>Combo</th><th class="num">Weight</th>${atNode ? "<th>Mix</th>" + labels.map((l) => `<th class="num">${l.text}</th>`).join("") : ""}${river ? "<th class=\"num\">Bucket</th><th class=\"num\">Eq A</th><th class=\"num\">Eq B</th>" : ""}</tr></thead><tbody>`;
+    for (const h of cell.hands) {
+      if (!possible[h]) {
+        html += `<tr class="off"><td class="combo-name">${comboHtml(h)}</td><td colspan="${1 + (atNode ? A + 1 : 0) + (river ? 3 : 0)}">blocked by the board</td></tr>`;
+        continue;
+      }
+      html += `<tr><td class="combo-name">${comboHtml(h)}</td><td class="num data">${weights[h].toFixed(3)}</td>`;
+      if (atNode) {
+        let mini = `<div class="mini">`;
+        for (let a = 0; a < A; a++) mini += `<span style="width:${100 * mixes[h * A + a]}%;background:${colorOf(labels[a].kind)}"></span>`;
+        html += `<td>${mini}</div></td>`;
+        for (let a = 0; a < A; a++) html += `<td class="num data">${(100 * mixes[h * A + a]).toFixed(1)}%</td>`;
+      }
+      if (river) html += `<td class="num data">${ctx.ids[h]}</td><td class="num data">${ctx.eq[h * 2].toFixed(3)}</td><td class="num data">${ctx.eq[h * 2 + 1].toFixed(3)}</td>`;
+      html += "</tr>";
+    }
+    html += "</tbody></table></div>";
+    if (atNode && !showMix) html += `<p class="stats">The mix columns are P${model.templates[t].players[s.at.k]}'s strategy at this node for these cards; the weight is P${player}'s range.</p>`;
+    el.innerHTML = html;
+  }
+
+  let renderToken = 0;
+  async function render() {
+    const token = ++renderToken;
+    const s = spot();
+    renderBoards(s);
+    renderPath(s);
+    if (s.at.kind === "node" && (s.needTurn || s.needRiver) && !state.picker) {
+      state.picker = s.needTurn ? (state.turn[0] === null ? "tA" : "tB") : (state.river[0] === null ? "rA" : "rB");
+      renderBoards(s);
+    }
+    try {
+      const ctx = await context(s);
+      if (token !== renderToken) return;
+      if (s.needTurn || s.needRiver) {
+        // Show the street before's view, without strategy, until the cards are picked.
+        const shown = { ...s, street: s.needTurn ? 0 : 1 };
+        renderWaiting(s, ctx, shown);
+        return;
+      }
+      renderAll(s, ctx);
+    } catch (e) {
+      if (token !== renderToken) return;
+      setStatus(`Couldn't load the strategy: ${e.message}. Reload the page to try again.`, true);
+    }
+  }
+
+  // At a street whose cards aren't picked yet: the acting player's range so far, no mix.
+  function renderWaiting(s, ctx, shown) {
+    const actor = model.templates[s.at.t].players[s.at.k];
+    const possible = model.possible(publicCards(shown.street));
+    const weights = C.rangeWeights(model, ctx, s.decisions, actor, possible);
+    const g = C.grid(model, possible, weights, null, 1);
+    $("view-toggle").innerHTML = "";
+    $("grid-title").textContent = `P${actor} range before the ${STREETS[s.at.t].toLowerCase()}`;
+    const gridEl = $("grid");
+    gridEl.innerHTML = "";
+    g.cells.forEach((cell) => {
+      const b = document.createElement("div");
+      b.className = "cell" + (cell.possible ? "" : " blocked");
+      const share = cell.possible ? cell.weight / cell.possible : 0;
+      if (share > 0) b.innerHTML = `<div class="fill" style="height:${(100 * share).toFixed(2)}%"><span style="width:100%;background:var(--range)"></span></div>`;
+      b.innerHTML += `<span class="lab">${cell.label}</span>`;
+      gridEl.appendChild(b);
+    });
+    $("legend").innerHTML = `<span><i class="sw" style="background:var(--range)"></i>share of the class in P${actor}'s range</span>`;
+    renderNode(s, true, actor, [], null, 0, g, actor);
+    $("inspector").innerHTML = `<p class="stats" style="margin:0">Pick the cards above to inspect combos here.</p>`;
+  }
+
+  async function start() {
+    try {
+      const meta = await load("meta.json", "json");
+      model = new C.Model(meta);
+      const fb = await load("flop.bin", "bin");
+      flop = new C.StreetStrategy(model, new Uint8Array(fb), 1, model.H);
+      renderChips();
+      state.cell = 0;
+      render();
+    } catch (e) {
+      setStatus(`Couldn't load the checkpoint data: ${e.message}`, true);
+    }
+  }
+  start();
+})();
+</script>

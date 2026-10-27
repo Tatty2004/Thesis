@@ -13,6 +13,8 @@ default output is results/viewer/<method>_t<t>/:
   centers/<turn A>.bin      those turn deals' bucket centers, float64, (45, k, dim)
   check.json                the export's own checks (decoding error, row sums, the flop report)
   fixtures/                 with --fixtures: references for viewer/test_core.mjs
+  web/                      what gets published: meta.json, and every .bin above as gzip + base64
+                            text (<name>.txt), since artifacts serve no raw binary type
 
 Encoding: every (deal, line, hand or bucket id) row holds W = sum over nodes of (actions - 1)
 uint8 values, node k's at bytes off[k] .. off[k] + A_k - 2. They are the average strategy
@@ -28,12 +30,13 @@ Refresh (checkpoints arrive every 2 h; the 2 h milestones are hard-linked in kee
         --checkpoint results/m1/m1_kmeans2d/solve/ckpt_t<T>.npz --fixtures
     node viewer/test_core.mjs results/viewer/kmeans_2d_t<T>
 
-then republish every data file of results/viewer/kmeans_2d_t<T>/ to the same artifact URL, in
-batches under 64 MB (viewer/README.md).
+then republish web/ to the same artifact URL in batches under 64 MB (viewer/README.md).
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
 import json
 import time
 from pathlib import Path
@@ -86,6 +89,18 @@ def write(path: Path, data: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         f.write(np.ascontiguousarray(data).tobytes())
+
+
+def pack_web(out: Path, names: list) -> None:
+    """web/: meta.json, and each .bin as one line of base64 of its gzip (mtime 0, so reproducible)."""
+    web = out / "web"
+    web.mkdir(exist_ok=True)
+    (web / "meta.json").write_bytes((out / "meta.json").read_bytes())
+    files = ["flop"] + [f"{kind}/{n}" for kind in ("turn", "river", "centers") for n in names]
+    for f in files:
+        dest = web / f"{f}.txt"
+        dest.parent.mkdir(exist_ok=True)
+        dest.write_bytes(base64.b64encode(gzip.compress((out / f"{f}.bin").read_bytes(), compresslevel=9, mtime=0)))
 
 
 def main(argv=None) -> int:
@@ -214,7 +229,7 @@ def main(argv=None) -> int:
         "ante": game.ante, "bet_sizes": list(game.bet_sizes),
         "templates": [template_json(tp) for tp in templates],
         "contrib": [c.tolist() for c in pt.contrib],
-        "encoding": {"dtype": "uint8", "scale": SCALE, "width": W, "offsets": off.tolist(),
+        "encoding": {"transport": "web/<name>.txt = base64 of gzip of <name>.bin", "dtype": "uint8", "scale": SCALE, "width": W, "offsets": off.tolist(),
                      "turn_group": TURN_GROUP,
                      "shapes": {"flop": list(enc[0].shape), "turn": [TURN_GROUP] + list(enc[1].shape[1:]),
                                 "river": [TURN_GROUP] + list(enc[2].shape[1:]),
@@ -222,6 +237,7 @@ def main(argv=None) -> int:
         "shards": names,
     }
     (out / "meta.json").write_text(json.dumps(meta))
+    pack_web(out, names)
     (out / "check.json").write_text(json.dumps(checks, indent=1))
     print(f"wrote {out}: max decoding error {max(checks['max_abs_error'].values()):.5f}, reread "
           f"{checks['reread_max_abs_error']:.5f}, flop report {checks['flop_p0_bet']}", flush=True)
