@@ -2,7 +2,7 @@
 
 Current step: 3, Fit the real-deck buckets
 Last passed gate: 2, 05:02, commit `f27de52` (code), status `1442a1c`+
-Running jobs: fits 31994725 (kmeans_2d, node204, submitted 05:01, about 1.3 h, ends about 06:25) and 31994726 (avg_1d, node204, about 10 min)
+Running jobs: fits 31994725 (kmeans_2d, node204, submitted 05:01, about 1.3 h, ends about 06:25) (31994726, avg_1d, finished 05:15)
 Next action: submit Step 3's two fits, then judge Gate 3 from fit_checks.json
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
@@ -126,3 +126,11 @@ Code at `f27de52` (no code changes since the rehearsal), all jobs on node010 (Go
 - 31994725: `m1_fit.sbatch --config m1_kmeans2d.yaml` (4 CPUs, 8G, 4 h), node204.
 - 31994726: `m1_fit.sbatch --config m1_avg1d.yaml` (4 CPUs, 8G, 1 h), node204.
 - Commit `4b4023a` (clean `bombpot/`).
+
+### 05:17, Step 3: avg_1d fit done, all checks PASS (Gate 3 half)
+Job 31994726, node204 (Gold 5320), COMPLETED in 14 min: 36 s to build, 519 s to fit (0.25 s per turn deal), peak 0.34 GB (sacct MaxRSS 0.38 GB).
+- Shape (2070, 200, 1), finite, in [0, 1], weakest first: PASS.
+- Deterministic: refits of turn deals 0, 1035, 2069, and 0 from the seed: all identical.
+- Ids well formed at 5 turn deals × 5 rivers: PASS.
+- `meta.json`: git `af52b9b`, dirty false.
+- **Occupancy (reported, not judged):** over 25 river deals with 861 possible hands each: min 0, median 0, max 102 hands per bucket; **64% of the 200 buckets are empty at a given river deal.** The centers are fitted per turn deal on 50 sampled rivers, so at any one river most 1D centers get no hands. Odd enough to flag, but the procedure says report only. kmeans_2d's numbers will show whether this is particular to 1D.
