@@ -1,9 +1,9 @@
 # M1 status
 
-Current step: 4, Real-deck pilot
-Last passed gate: 3, 06:18, commit `af52b9b` (code, both fits)
-Running jobs: timing 31994800 (b256-t64, node204, ends about 07:20); exact-check timing 31994814 (node202, `--max-minutes 20`, submitted 07:04, ends about 07:30)
-Next action: when both end, choose batch and threads, then judge Gate 4
+Current step: 5, Launch the long solves
+Last passed gate: 4, 07:32, commit `af52b9b` (code)
+Running jobs: none (submitting Step 5)
+Next action: submit the two long solves
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -177,10 +177,26 @@ kmeans_2d: job 31994725, node204, COMPLETED in 1 h 15 min: 4,148 s to fit (2.00 
 
 | Job | Batch | Threads | s/it | River deals/s | Peak (log) | MaxRSS |
 |---|---:|---:|---:|---:|---:|---:|
-| 31994797 | 64 | 64 | 7.124 | 35.9 | 9.82 GB | see below |
-| 31994798 | 64 | 32 | 7.192 | 35.6 | 9.80 GB | |
-| 31994799 | 256 | 32 | 28.418 | 36.0 | 18.60 GB | |
-| 31994800 | 256 | 64 | running | | | |
-| 31994796 (node202) | 64 | 32 | 7.151 | 35.8 | 9.89 GB | 24.2 GB |
+| 31994797 | 64 | 64 | 7.124 | 35.9 | 9.82 GB | 16.5 GB |
+| 31994798 | 64 | 32 | 7.192 | 35.6 | 9.80 GB | 16.5 GB |
+| 31994799 | 256 | 32 | 28.418 | 36.0 | 18.60 GB | 19.4 GB |
+| 31994800 | 256 | 64 | 28.440 | 36.0 | 18.61 GB | 19.5 GB |
+| 31994796 (node202) | 64 | 32 | 7.151 | 35.8 | 9.89 GB | 24.2 GB (incl. the two-solver resume check) |
 
 - Exact-check timing 31994814 submitted 07:04: `THREADS=32 sbatch -w node202 --time=00:40:00 --mem=32G m1_eval.sbatch --checkpoint results/m1/m1_kmeans2d/solve-pilot/ckpt_t000000367.npz --max-minutes 20`.
+
+### 07:32, Gate 4: PASS
+- **Exact-check timing** 31994814 (node202, 32 threads, checkpoint t 367): stopped after 20 min as asked, at 237 of 15,299 chunks (256 river deals each, 3,916,440 in all), 5.05 s per chunk, steady. **Projected 21.5 h for a full exact check.** Peak 9.35 GB (sacct MaxRSS 9.7 GB). `.timing.json` records clean git.
+- **Checks:**
+  - Resume bit-identical on the real deck: **PASS** (31994796: regret, cum, sigma, t and generator).
+  - Health checks: **PASS**, all 9 across the five pilot and timing solves.
+  - Rule 7: 7.15 s/it (limit 60); peak 24.2 GB (limit 150); exact check 21.5 h (limit 6 days). **Inside all three.**
+- **Batch: 64 × 4 (unchanged).** At 256 × 4 the river deals per second were 36.0 vs 35.6–35.9 at 64. That's 0.3–1.1% higher, inside the spread among the batch-64 runs themselves (0.8%), so the pilot doesn't show 256 to be faster. 256 also needs about twice the memory and gives a quarter of the iterations. The configs are unchanged.
+- **Threads: 32 per 64 CPUs (unchanged from Step 0).** 64 threads was 0.9% faster at batch 64 and 0.1% slower at batch 256: no real difference. 32 matches Step 0's finding that hyperthreads don't help.
+- **Projections** at 7.15 s/it, batch 64:
+  - one pass over all 2,070 turn deals = 2070 / 64 × 7.15 s = **3.9 min** (0.064 h);
+  - a 71.5 h solve ≈ 36,000 iterations ≈ 1,110 passes;
+  - exact check ≈ 21.5 h per checkpoint at 32 threads on Gold 5320.
+- **Memory request for Step 5:** twice the pilot's peak. The largest measured is MaxRSS 24.2 GB (it includes the resume check; a plain solve measured 16.5 GB), so **`--mem=50G`**.
+- Disk: `results/m1` 34 GB (pilot and timing checkpoints, 6.6 GB each). Scratch has 2.3 TB free.
+- No merge changes, so the Step 1–2 tests didn't need rerunning.
