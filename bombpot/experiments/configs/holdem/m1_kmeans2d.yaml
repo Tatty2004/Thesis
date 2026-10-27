@@ -1,0 +1,22 @@
+# M1 (bombpot/holdem/M1_CLAUDE.md): the first full solve of real double-board Hold'em on the 52-card
+# deck (flop, turn and river, both boards) for one pair of flops, with the sampled solver.
+# River buckets: kmeans_2d on (equity A, equity B), the thesis method; m1_avg1d.yaml is the 1D baseline.
+# The game is Holdem(flops=("Ah7c2d", "KsKd9h"), board_cards=(3, 1, 1)), Holdem's defaults written
+# out: limit, ante 1, bets 2/4/4, a bet and one raise per street.
+game:
+  num_ranks: 13
+  num_suits: 4
+  flops: ["Ah7c2d", "KsKd9h"]
+  board_cards: [3, 1, 1]
+  ante: 1.0
+  bet_sizes: [2.0, 4.0, 4.0]
+  max_raises: 2
+buckets: {method: kmeans_2d, k: 200, samples: 50, seed: 0, restarts: 3}
+solver: {batch: 64, samples: 4, seed: 0}
+run:
+  budget_hours: 71.5          # a 3-day job (--time=3-00:00:00), stopping 30 minutes before its walltime
+  checkpoint_hours: 2
+  log_minutes: 5
+  milestone_hours: [2, 4, 8, 16, 32, 64]
+  eval_chunk: 256
+  flop_hands: ["KcKh", "AcAd", "7d7h", "9c9d", "5s6s", "3c4d"]

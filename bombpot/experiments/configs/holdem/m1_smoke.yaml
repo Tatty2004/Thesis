@@ -1,0 +1,23 @@
+# M1 rehearsal (bombpot/experiments/m1.py, bombpot/holdem/M1_CLAUDE.md step 2) on the small deck
+# of tests/holdem/test_holdem_river.py: 5 ranks x 3 suits, fixed flops, 36 hands, 72 turn deals,
+# 3,024 river deals. Fitted kmeans_2d buckets; m1_smoke_lossless.yaml is the same game with the
+# lossless river. Minutes, not hours: checkpoints about a minute apart, and milestones of 1.2,
+# 2.4 and 4.8 minutes of solving so that retention has something to keep.
+game:
+  num_ranks: 5
+  num_suits: 3
+  flops: ["2c3c4d", "5c6d4c"]
+  board_cards: [3, 1, 1]
+  ante: 1.0
+  bet_sizes: [2.0, 4.0, 4.0]
+  max_raises: 2
+buckets: {method: kmeans_2d, k: 3, samples: 12, seed: 0, restarts: 3}
+solver: {batch: 16, samples: 4, seed: 0}
+run:
+  budget_hours: 0.06          # 3.6 minutes from the start of the process
+  checkpoint_hours: 0.0125    # 45 seconds
+  log_minutes: 0.5
+  milestone_hours: [0.02, 0.04, 0.08]
+  eval_chunk: 256
+  eval_in_process: true       # the exact check takes seconds here; never on the real deck
+  flop_hands: ["6c6h", "2d2h", "3d5d"]

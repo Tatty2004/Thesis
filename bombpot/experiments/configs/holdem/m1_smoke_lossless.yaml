@@ -1,0 +1,21 @@
+# M1 rehearsal on the small deck (see m1_smoke.yaml) with the lossless river: every river deal is
+# its own row, so this is the exact game and evaluate must reproduce the solve's in-process exact
+# check exactly. Checkpoints are about 0.9 GB here (3,024 river rows), so fewer of them.
+game:
+  num_ranks: 5
+  num_suits: 3
+  flops: ["2c3c4d", "5c6d4c"]
+  board_cards: [3, 1, 1]
+  ante: 1.0
+  bet_sizes: [2.0, 4.0, 4.0]
+  max_raises: 2
+buckets: {method: lossless}
+solver: {batch: 16, samples: 4, seed: 0}
+run:
+  budget_hours: 0.06          # 3.6 minutes from the start of the process
+  checkpoint_hours: 0.02      # 1.2 minutes
+  log_minutes: 0.5
+  milestone_hours: [0.02, 0.04, 0.08]
+  eval_chunk: 256
+  eval_in_process: true
+  flop_hands: ["6c6h", "2d2h", "3d5d"]
