@@ -2,8 +2,8 @@
 
 Current step: 2, The M1 run script, rehearsed on the small deck
 Last passed gate: 1, 03:55, commit `2cf050f`
-Running jobs (submitted 04:45, minutes each, node010): uninterrupted twins 31994695 (m1_smoke, to t 5453) and 31994696 (m1_smoke_lossless, to t 4683); evaluations 31994697 (lossless t 1807), 31994698 (lossless t 4683), 31994699 (smoke t 1235), 31994700 (smoke t 5453, after 31994697)
-Next action: see M1_HANDOFF.md (handoff written 04:50); judge Gate 2 when the twins and the retention recheck end
+Running jobs: retention recheck 31994703 (node010, started 04:52, about 4 min), then 31994704 (`--resume`, after 31994703)
+Next action: when 31994704 ends, run `m1_check_retention.py` on `solve-retention`, then judge Gate 2
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -103,3 +103,10 @@ Job 31994378 on node202 (Xeon Gold 5320, 104 threads), commit `ec589c6` (after t
   - Lossless in-process exact exploitability falls: 0.199 → 0.074 → 0.056 → 0.041 → 0.032.
 - Tests on a compute node (job 31994678): `test_m1.py`, the checkpoint tests and the rules, **19 passed**.
 - Added `m1.py check --checkpoint P` (loads into a fresh solver, health check, flop strategy), for Gate 5's "the checkpoint loads". Commit `fdec2b7`.
+
+### 04:55, takeover by a new Claude instance
+- Read the host rules, both CLAUDE.md files, `M1_CLAUDE.md`, this file and `M1_HANDOFF.md`, then checked the system: branch `m1` at `f27de52`, clean tree; in `squeue` only 31994703 (running) and 31994704 (pending, dependency). The header's job list was stale (the twins and all four evaluations had already ended, all COMPLETED, exit 0), so I corrected it.
+- **Twin comparisons** (`m1.py compare`, uninterrupted vs stopped-and-resumed):
+  - `m1_smoke`, t 5453 (job 31994695 vs `solve/`): **bit-identical**.
+  - `m1_smoke_lossless`, t 4683 (job 31994696 vs `solve/`): **bit-identical**.
+  - Both twins' health checks PASS (max row-sum error 3.3e-16). The lossless twin's in-process exploitability at t 4683 is 0.0286184, equal to the resumed run's evaluation.
