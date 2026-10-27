@@ -2,8 +2,8 @@
 
 Current step: 5, Launch the long solves
 Last passed gate: 4, 07:32, commit `af52b9b` (code)
-Running jobs (submitted 07:30, 3-day walltime, budget 71.5 h, so expected end about 2026-10-30 07:00): long solve 31994837 (m1_kmeans2d, node202), long solve 31994838 (m1_avg1d, node204)
-Next action: Gate 5 at each solve's first checkpoint (about 09:30), then the Step 7 report, then stop
+Running jobs (submitted 08:12, 3-day walltime, budget 71.4 h, expected end about 2026-10-30 07:37): long solve 31994844 (m1_kmeans2d, node202), long solve 31994845 (m1_avg1d, node204)
+Next action: Gate 5 at each solve's first checkpoint (about 10:15), then the Step 7 report, then stop
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -215,3 +215,7 @@ Gates 0–4 all passed and the pilot is inside rule 7, so per the user's instruc
 - 31994837 and 31994838 exited at once: "budget ends 07:00:51, the job's walltime 2026-10-30 07:30:48: 30 min apart / the time budget must end at least 30 min before the walltime". The guard (written tonight) counts the budget from process start, 3 s after the job started, so a 71.5 h budget in a 72 h job leaves 29 min 57 s. The configs' 71.5 was a mistake written tonight, not a solver problem. No checkpoints were written.
 - I noticed only at 08:11: my watcher waited for an iteration line and didn't stop when the jobs left the queue. About 40 minutes lost. Later watchers also stop when the job leaves the queue.
 - **Fix:** `budget_hours: 71.4` in `m1_kmeans2d.yaml` and `m1_avg1d.yaml` (stops 36 min before the walltime). Nothing else changed. `test_m1.py`: 5 passed. `keep_config` compares only game and buckets, so the run folders accept it.
+
+### 08:18, Step 5: long solves running
+- 31994844 (m1_kmeans2d, node202) and 31994845 (m1_avg1d, node204), same commands as at 07:30, from clean `dac4d85`. Both report "budget ends 07:36, the job's walltime 2026-10-30 08:12: 36 min apart".
+- First 5 minutes: kmeans_2d 7.330 s/it (the pilot ran 7.151); **avg_1d 4.678 s/it**, 35% faster than the kmeans_2d pilot. It's the only method piloted. avg_1d's bucket lookup is one-dimensional, probably cheaper. Gate 5's "within 25% of the pilot's" is judged at the first checkpoint.
