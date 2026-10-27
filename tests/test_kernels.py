@@ -8,7 +8,8 @@ import pytest
 
 from bombpot.core.jit import Kernel
 from bombpot.core.removal import HandSet, _beats_kernel, _fold_kernel
-from bombpot.core.solvers.range_cfr import _expectation
+from bombpot.core.solvers.range_cfr import (_after_actions, _combine, _copy, _expectation, _gather_rows, _scaled,
+                                            _segment_sum_kernel, _showdown)
 from bombpot.core.solvers.range_cfr import _update as range_update
 from bombpot.core.solvers.sampled_cfr import _update as sampled_update
 
@@ -23,11 +24,22 @@ _last = np.ones(_s.shape, bool)
 _last[..., :-1] = _s[..., 1:] != _s[..., :-1]
 GROUP_END = np.minimum.accumulate(np.where(_last, np.arange(H) + 1, H)[..., ::-1], axis=2)[..., ::-1].copy()
 SIG = rng.dirichlet(np.ones(A), size=N)
+SIG4 = rng.dirichlet(np.ones(A), size=(D, L, H))
+COEF = rng.normal(size=L)
+PARENT = rng.integers(0, 3, size=D)
 
 CASES = {
     "fold": (_fold_kernel, lambda: (REACH, VALID, KAPPA, HANDS.subs, HANDS.signs, HANDS.n_subsets, np.empty_like(REACH))),
     "beats": (_beats_kernel, lambda: (REACH, VALID, KAPPA, ORDER, GROUP_END, HANDS.subs, HANDS.signs, HANDS.n_subsets,
                                       np.empty_like(REACH))),
+    "after_actions": (_after_actions, lambda: (REACH, SIG4, np.empty((A, D, L, H)))),
+    "scaled": (_scaled, lambda: (COEF, REACH, np.empty_like(REACH))),
+    "showdown": (_showdown, lambda: (COEF, REACH, rng.random((D, L, H)), np.empty_like(REACH))),
+    "copy": (_copy, lambda: (REACH, np.empty_like(REACH))),
+    "combine_sum": (_combine, lambda: (rng.normal(size=(A, N)), np.empty(N), False)),
+    "combine_max": (_combine, lambda: (rng.normal(size=(A, N)), np.empty(N), True)),
+    "segment_sum": (_segment_sum_kernel, lambda: (rng.normal(size=(D, 7)), PARENT, np.zeros((3, 7)))),
+    "gather_rows": (_gather_rows, lambda: (rng.normal(size=(3, 7)), PARENT, np.empty((D, 7)))),
     "expectation": (_expectation, lambda: (SIG, rng.normal(size=(A, N)), np.empty(N), np.empty((N, A)))),
     **{f"range_update_{v}": (range_update, lambda v=v: (rng.normal(size=(N, A)), rng.normal(size=(N, A)), SIG.copy(),
                                                         rng.random((N, A)), rng.random(N), 4.0, 0.7, 0.5, v))

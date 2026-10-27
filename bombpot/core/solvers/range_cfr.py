@@ -63,10 +63,99 @@ def _update(regret, instant, sigma, cum, own, weight, pos, neg, variant):
             sigma[n, a] = (max(regret[n, a], 0.0) / total) if total > 0.0 else 1.0 / A
 
 
+# The passes' elementwise work, compiled so that it runs in parallel on big streets. Each
+# kernel does the same arithmetic in the same order as the numpy expression it replaced,
+# so results are bit-identical. Arrays are (D, L, H) per hand, as in the passes below.
+
+
+@kernel
+def _after_actions(r, sig, out):
+    """out[a, d, l, h] = r[d, l, h] * sig[d, l, h, a]: the reach after each action."""
+    D, L, H, A = sig.shape
+    for m in prange(D * L):
+        d, l = m // L, m % L
+        for h in range(H):
+            x = r[d, l, h]
+            for a in range(A):
+                out[a, d, l, h] = x * sig[d, l, h, a]
+
+
+@kernel
+def _scaled(coef, x, out):
+    """out[d, l, h] = coef[l] * x[d, l, h]."""
+    D, L, H = out.shape
+    for m in prange(D * L):
+        d, l = m // L, m % L
+        c = coef[l]
+        for h in range(H):
+            out[d, l, h] = c * x[d, l, h]
+
+
+@kernel
+def _showdown(coef, share, fold, out):
+    """out[d, l, h] = coef[l] * (2 share[d, l, h] - fold[d, l, h])."""
+    D, L, H = out.shape
+    for m in prange(D * L):
+        d, l = m // L, m % L
+        c = coef[l]
+        for h in range(H):
+            out[d, l, h] = c * (2.0 * share[d, l, h] - fold[d, l, h])
+
+
+@kernel
+def _copy(src, out):
+    D, L, H = out.shape
+    for m in prange(D * L):
+        d, l = m // L, m % L
+        for h in range(H):
+            out[d, l, h] = src[d, l, h]
+
+
+@kernel
+def _combine(cv, out, best):
+    """out[n] = cv[0, n] + cv[1, n] + ... in action order, or their max when `best`."""
+    A, N = cv.shape
+    for n in prange(N):
+        v = cv[0, n]
+        for a in range(1, A):
+            x = cv[a, n]
+            if not best:
+                v = v + x
+            elif x > v:  # on a tie keep the earlier value, as numpy's maximum does
+                v = x
+        out[n] = v
+
+
+@kernel
+def _segment_sum_kernel(values, parent, out):
+    """out[parent[d], j] += values[d, j], adding child deals in order (as np.add.at does)."""
+    D, M = values.shape
+    for j in prange(M):
+        for d in range(D):
+            out[parent[d], j] += values[d, j]
+
+
+@kernel
+def _gather_rows(src, parent, out):
+    """out[d, j] = src[parent[d], j]."""
+    D, M = out.shape
+    for d in prange(D):
+        for j in range(M):
+            out[d, j] = src[parent[d], j]
+
+
+def _children_reach(r: np.ndarray, sig: np.ndarray) -> np.ndarray:
+    """r * sig[..., a] for every action a, as one (A, D, L, H) array."""
+    out = np.empty((sig.shape[-1],) + r.shape)
+    _after_actions(out.size, r, sig, out)
+    return out
+
+
 def _segment_sum(values: np.ndarray, parent: np.ndarray, n: int) -> np.ndarray:
     """Sum the rows of `values` (first axis = child deals) into their parent deals."""
     out = np.zeros((n,) + values.shape[1:])
-    np.add.at(out, parent, values)
+    flat = np.ascontiguousarray(values).reshape(len(values), -1)
+    _segment_sum_kernel(flat.size, flat, np.ascontiguousarray(parent), out.reshape(n, -1))
     return out
 
 
@@ -83,9 +172,10 @@ def street_reach(tp, hsig_t, root):
     for k in range(tp.num_nodes):
         r = nodes[k]
         q = tp.players[k]
+        after = _children_reach(r[q], hsig_t[k])
         for a, child in enumerate(tp.children[k]):
             c = list(r)
-            c[q] = r[q] * hsig_t[k][..., a]
+            c[q] = after[a]
             if child[0] == "node":
                 nodes[child[1]] = tuple(c)
             elif child[0] == "close":
@@ -97,7 +187,13 @@ def next_root(closing, parent: np.ndarray) -> tuple:
     """Reach at the next street's root deals: each deal takes its parent's reach after every
     closing line, so its lines are (previous lines x closing lines)."""
     D, H = len(parent), closing[0][0].shape[-1]
-    return tuple(np.stack([c[p][parent] for c in closing], axis=2).reshape(D, -1, H) for p in (0, 1))
+    out = []
+    for p in (0, 1):
+        src = np.stack([c[p] for c in closing], axis=2)  # (parent deals, L, closes, H)
+        rows = np.empty((D,) + src.shape[1:])
+        _gather_rows(rows.size, src.reshape(len(src), -1), np.ascontiguousarray(parent), rows.reshape(D, -1))
+        out.append(rows.reshape(D, -1, H))
+    return tuple(out)
 
 
 def forward(pt: PublicTree, hsig) -> list:
@@ -125,35 +221,33 @@ def street_values(tp, st, contrib, hsig_t, reach_t, p: int, mode: str, last: boo
     nodes in mode "cfr". `agg` holds the closing lines' values when the street isn't last."""
     o = 1 - p
     sign = 1.0 if p == 0 else -1.0
-    contrib = contrib[None, :, None]
     V = [None] * tp.num_nodes
     R = [None] * tp.num_nodes
     for k in range(tp.num_nodes - 1, -1, -1):
         q = tp.players[k]
         rk = reach_t[k]
-        cv = np.empty((len(tp.actions[k]),) + rk[o].shape)
+        A = len(tp.actions[k])
+        cv = np.empty((A,) + rk[o].shape)
+        ros = _children_reach(rk[o], hsig_t[k]) if q == o else None
         for a, child in enumerate(tp.children[k]):
-            ro = rk[o] * hsig_t[k][..., a] if q == o else rk[o]
+            ro = ros[a] if q == o else rk[o]
+            n = cv[a].size
             if child[0] == "node":
-                v = V[child[1]]
+                _copy(n, V[child[1]], cv[a])
             elif child[0] == "fold":
                 _, folder, extra = child
                 lost = contrib + extra
                 u0 = -lost if folder == 0 else lost
-                v = sign * u0 * st.fold(ro, p)
+                _scaled(n, sign * u0, st.fold(ro, p), cv[a])
             elif last:  # showdown: player 0 wins pot x share - chips; player 1 the negative
                 chips = contrib + tp.closes[child[1]][1]
-                v = sign * chips * (2 * st.share(ro, p) - st.fold(ro, p))
+                _showdown(n, sign * chips, st.share(ro, p), st.fold(ro, p), cv[a])
             else:
-                v = agg[:, :, child[1], :]
-            cv[a] = v
-        if q != p:
-            V[k] = cv.sum(0)
-        elif mode == "br":
-            V[k] = cv.max(0)
+                _copy(n, agg[:, :, child[1], :], cv[a])
+        V[k] = np.empty(cv.shape[1:])
+        if q != p or mode == "br":
+            _combine(cv.size, cv.reshape(A, -1), V[k].reshape(-1), q == p)
         else:
-            A = cv.shape[0]
-            V[k] = np.empty(cv.shape[1:])
             R[k] = np.empty(cv.shape[1:] + (A,))
             _expectation(cv.size, np.ascontiguousarray(hsig_t[k]).reshape(-1, A), cv.reshape(A, -1),
                          V[k].reshape(-1), R[k].reshape(-1, A))
