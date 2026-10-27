@@ -56,8 +56,10 @@ A solve runs for days and an exact check takes many hours, so M1 can't *finish* 
 ## Step 0: Starting point
 
 - `git checkout main && git pull`, then `git checkout -b m1`.
-- **The speed fix's scaling test** must already have run on the current `main` (`scale_node.sbatch`, 8 to 104 CPUs). If it hasn't, run it now.
-- **Choose CPUs from it:** use the smallest CPU count whose seconds per iteration is within 10% of the fastest. Use that count for the solve and evaluation jobs.
+- **The speed fix's scaling test** has run (2026-10-27, node202): 32 CPUs 1.16 s, 64 CPUs 1.01 s, a whole node with 52 threads 0.81 s; hyperthreads slightly hurt.
+- **CPUs for M1's jobs:** 64 CPUs with 32 threads, one per physical core (`THREADS=32`). That's about half a node per job.
+  - It hasn't been timed yet, so time it in Step 4's pilot next to 64 CPUs with 64 threads.
+  - Use the faster of the two for the solves and evaluations.
 - **The full test suite with `--runslow`** must pass on this commit (`scripts/ionic/tests.sbatch --runslow`). If that run hasn't happened, run it.
 
 **Gate 0:**
@@ -147,6 +149,12 @@ Run `m1_fit.sbatch` for each method. The laptop took about 1.7 s per turn deal, 
 - `meta.json` records a clean git hash.
 
 ## Step 4: Real-deck pilot
+
+**First, pick up any newer `main`.** A speed fix for the river code (bucket lookup, scatter and gather) may land on `main` tonight.
+- Run `git fetch && git merge origin/main` into `m1`.
+- If the merge brought changes, rerun the full test suite and your Step 1–2 tests before going on (a gate).
+- If the merge conflicts, stop and report.
+- The fitted buckets from Step 3 stay valid: the fix doesn't change results.
 
 Submit `m1_solve.sbatch` with `m1_kmeans2d.yaml` and a 45-minute time budget, checkpointing every 15 minutes, with the chosen CPUs.
 
