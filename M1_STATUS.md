@@ -2,8 +2,8 @@
 
 Current step: 2, The M1 run script, rehearsed on the small deck
 Last passed gate: 1, 03:55, commit `2cf050f`
-Running jobs: none
-Next action: test `m1.py` locally, commit it, then run the rehearsal through the Slurm scripts
+Running jobs (all submitted 04:36, minutes each, pinned to node010): m1_smoke fit 31994672, solve 31994673, resume 31994674; m1_smoke_lossless fit 31994675, solve 31994676, resume 31994677; tests 31994678 (`test_m1.py`, checkpoint tests, rules)
+Next action: when the resumes end, submit the uninterrupted twins (`--tag straight --iterations <final t>`) and evaluations of two checkpoints per config, then judge Gate 2
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -67,3 +67,28 @@ Job 31994378 on node202 (Xeon Gold 5320, 104 threads), commit `ec589c6` (after t
 ### Measured on spin (Xeon Silver 4316) for sizing
 - Real-deck bucket fit, k = 200, 50 rivers: **kmeans_2d 2.27 s per turn deal** (about 1.3 h for 2,070), **avg_1d 0.25 s** (about 9 min). The fit is sequential (one generator through the turn deals), so `m1_fit.sbatch` asks for 4 CPUs, not 64.
 - Real-deck layout: flop, turn and river templates have 1, 5 and 25 entering lines and 14 actions over 6 nodes. Regret, average and strategy are about 2.4 GB each once every turn deal has been sampled, so **a checkpoint is about 7.1 GB**, uncompressed (the pilot will measure it).
+
+### 04:36, Step 2 code committed (`f8c5791`), rehearsal phase A submitted
+- `bombpot/experiments/m1.py`:
+  - **`fit`:** builds the game, `holdem_public_tree(game, upto=2)` and `HoldemRiver`, then calls `fit_equity_buckets` **one turn deal at a time on one shared generator**. `default_rng` passes a Generator through unaltered, so the centers are bit-identical to one call; `test_m1.py` checks this, and `check-fit --full` checks it on the smoke deck. This lets it log progress and record the generator's state before each turn deal (`fit_states.json`). Gate 3's "refit 3 turn deals with the same seed" needs those states, because the generator runs through all turn deals in order. Writes `buckets.npz`, `meta.json` (config, git hash and dirty flag, versions, CPU model, timing), then runs **`check-fit`** (Gate 3's checks, written to `fit_checks.json`).
+  - **`solve`:**
+    - Time budget counted from process start; refuses to start unless it ends at least 30 min before the job's walltime (read from `squeue`).
+    - Checkpoints every `checkpoint_hours` and at the end, after the health check. The check covers finite arrays, average-strategy rows summing to 1 within 1e-9, and `t` increasing; a failure stops the solve without saving.
+    - Logs t, s/it, elapsed, solve hours and peak memory every `log_minutes`.
+    - Retention: newest 2 plus the first at or after each `milestone_hours`; `.eval.json` files are never deleted.
+    - Options: `--resume`, `--tag` (a separate `solve-<tag>/`), `--iterations`, overrides of budget, checkpoint interval and batch, and `--resume-check N` (at the end, N iterations uninterrupted vs resumed from the last checkpoint, compared bit for bit).
+    - At each checkpoint it logs player 0's flop bet frequency (overall and for `flop_hands`). With `eval_in_process` (small deck only) it also runs the exact check in-process.
+  - **`evaluate`:** loads a checkpoint, runs `exact_exploitability` with progress lines (chunks, s/chunk, projected total, ETA) every 2% or 2 minutes, and writes `ckpt_t<t>.eval.json` next to the checkpoint. With `--max-minutes` it stops early and writes `.timing.json`.
+  - **`compare`:** checks whether two checkpoints are bit-identical.
+- **Configs:**
+  - `m1_smoke.yaml`: small deck, kmeans_2d with k = 3.
+  - `m1_smoke_lossless.yaml`: small deck, lossless river. A separate file is how I read "include a Lossless option".
+  - `m1_kmeans2d.yaml` and `m1_avg1d.yaml`: the real deck, with the fixed choices written out. `test_m1.py` checks they equal `Holdem(flops=("Ah7c2d","KsKd9h"), board_cards=(3,1,1))`, k 200, 50 rivers, seed 0, restarts 3, batch 64 × 4.
+- **Slurm scripts:** `scripts/ionic/m1_fit.sbatch`, `m1_solve.sbatch` and `m1_eval.sbatch`, logging to `logs/m1/`. Solve and evaluate default to 64 CPUs with `THREADS` = half of them; fit asks for 4 CPUs.
+- **Local dry run on spin (throwaway config, deleted afterwards):** fit with checks; solve stopped by budget; `--resume`; an uninterrupted twin, **bit-identical** to the resumed run (t 1108); `evaluate` equal **exactly** to the in-process check at two checkpoints; the timing stop; `--resume-check 2` PASS.
+- **Rehearsal:** all pinned to node010 (Gold 5218), because bit-identical comparisons across jobs need the same CPU type. Node types in `all`:
+  - node2xx and node302: Gold 5320, the scaling test's type;
+  - node0xx below 020: Gold 5218;
+  - node020–026 and node10x: Gold 5220R;
+  - node403: Gold 6338;
+  - node9xx: Silver 4214.
