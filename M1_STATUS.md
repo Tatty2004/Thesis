@@ -1,9 +1,9 @@
 # M1 status
 
-Current step: 7, Morning report written; session stopped (Steps 5's solves keep running; Step 6 not started)
+Current step: 6, Exact checks of the 2 h checkpoints (authorized by the user 10:45)
 Last passed gate: 5 (both methods), 10:20; avg_1d's speed check accepted by the user at 10:40, commit `dac4d85`
-Running jobs: long solve 31994844 (m1_kmeans2d, node202) and 31994845 (m1_avg1d, node204), started 08:12, 3-day walltime, budget ends 2026-10-30 07:36
-Next action: the user decides on Step 6 (exact checks); push `m1`
+Running jobs: long solve 31994844 (m1_kmeans2d, node202) and 31994845 (m1_avg1d, node204), started 08:12, budget ends 2026-10-30 07:36; exact checks 31995076 (kmeans_2d t 1008, node203) and 31995077 (avg_1d t 1564, node206), submitted 10:45, expected about 21.5 h (walltime 1-08:15)
+Next action: Gate 6 when the exact checks finish (about 2026-10-28 08:30); push `m1`
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -303,3 +303,9 @@ Code changed after Gate 4: only `budget_hours` 71.5 → 71.4 in the two real-dec
 ### 10:40, Gate 5: avg_1d accepted by the user
 - The user accepted avg_1d's Gate 5 result: it is 36% faster than the kmeans_2d pilot, for the known reason that its 1D bucket lookup does about half the work. The speed check exists to catch an unexpectedly slow solve. avg_1d passes every other check. **Gate 5: PASS for both methods.** Job 31994845 continues unchanged.
 - Audit of Gates 1–4 (another session, on rinse): the twin comparisons and the retention check were rerun, both PASS. The core changes since `main` add code only, and no existing test changed. Bucket occupancy was studied over 30 turn deals × 50 training and 50 held-out rivers per method. Every one of the 200 centers is distinct and used across the training rivers. Only about 120 distinct equity points exist per river among 861 hands. So the empty buckets come from the per-turn-deal design, not a bug. At one river, kmeans_2d keeps 49% of distinct equity points apart and avg_1d 65%.
+
+### 10:45, Step 6: exact checks submitted (the user said go)
+- 31995076: `THREADS=32 sbatch -w node203 --time=1-08:15:00 --mem=20G scripts/ionic/m1_eval.sbatch --checkpoint results/m1/m1_kmeans2d/keep/ckpt_t000001008.npz`
+- 31995077: the same, `-w node206`, `--checkpoint results/m1/m1_avg1d/keep/ckpt_t000001564.npz`
+- Both on Gold 5320 (the pilot's timing type), from clean `96a9fc9`. Walltime 1.5 × the 21.5 h projection; memory 2 × the timing run's 9.7 GB. `eval.json` lands next to each checkpoint in `keep/`.
+- node206 is accepted by `-w` now (Step 3 had node208 and node302 refused).
