@@ -6,6 +6,7 @@ bombpot/holdem/M1_CLAUDE.md; the Slurm scripts are scripts/ionic/m1_*.sbatch.
     python -m bombpot.experiments.m1 check-fit --config C      the checks alone (Gate 3)
     python -m bombpot.experiments.m1 solve --config C [--resume] [--tag T] [overrides]
     python -m bombpot.experiments.m1 evaluate --checkpoint P [--max-minutes M]
+    python -m bombpot.experiments.m1 check --checkpoint P      does it load, and is it healthy?
     python -m bombpot.experiments.m1 compare A B               are two checkpoints bit-identical?
 
 A config's run folder is results/m1/<config name>/:
@@ -574,6 +575,26 @@ def cmd_evaluate(args) -> int:
     return 0
 
 
+def cmd_check(args) -> int:
+    """Whether a checkpoint loads into a fresh solver, its health check, and player 0's flop
+    bet frequency (Gate 5)."""
+    ckpt = Path(args.checkpoint).resolve()
+    run_dir = ckpt.parent.parent
+    cfg = yaml.safe_load((run_dir / "config.yaml").read_text())
+    run = {**RUN_DEFAULTS, **cfg.get("run", {})}
+    start = time.perf_counter()
+    game, pt, river, abstraction = build(cfg, run_dir)
+    solver = make_solver(cfg, pt, river, abstraction)
+    solver.load(ckpt)
+    loaded = time.perf_counter() - start
+    avg = solver.average_strategy()
+    health = health_check(solver, avg, 0)
+    print(f"{ckpt.name}: loads ({loaded:.0f} s with the trees; t {solver.t}, {solver.solve_seconds / 3600:.3f} h of "
+          f"solving); health check {'PASS' if health['passed'] else 'FAIL'} {health}; player 0's flop bet frequency "
+          f"{flop_report(game, pt, avg, run['flop_hands'])}; peak {peak_gb():.2f} GB")
+    return 0 if health["passed"] else 1
+
+
 def cmd_compare(args) -> int:
     """Whether two checkpoints hold bit-identical solver states: every array, t, the
     generator, batch, samples and seed (solve time aside)."""
@@ -612,12 +633,14 @@ def main(argv=None) -> int:
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--chunk", type=int, help="river deals per chunk (default: the config's run.eval_chunk)")
     p.add_argument("--max-minutes", type=float, help="stop after this long and record the projected time")
+    p = sub.add_parser("check")
+    p.add_argument("--checkpoint", required=True)
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")
     args = ap.parse_args(argv)
     commands = {"fit": lambda a: cmd_fit(a) or cmd_check_fit(a), "check-fit": cmd_check_fit, "solve": cmd_solve,
-                "evaluate": cmd_evaluate, "compare": cmd_compare}
+                "evaluate": cmd_evaluate, "check": cmd_check, "compare": cmd_compare}
     return commands[args.command](args)
 
 
