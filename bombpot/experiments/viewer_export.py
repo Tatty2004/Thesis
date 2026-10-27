@@ -30,7 +30,7 @@ Refresh (checkpoints arrive every 2 h; the 2 h milestones are hard-linked in kee
         --checkpoint results/m1/m1_kmeans2d/solve/ckpt_t<T>.npz --fixtures
     node viewer/test_core.mjs results/viewer/kmeans_2d_t<T>
 
-then republish web/ to the same artifact URL in batches under 64 MB (viewer/README.md).
+then republish web/ to the same artifact URL in batches under 64 MB, as viewer/README.md describes.
 """
 from __future__ import annotations
 
