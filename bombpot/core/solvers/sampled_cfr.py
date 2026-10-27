@@ -20,7 +20,10 @@ and Sandholm 2019), which needs no discounting of the infosets a sample skips.
 """
 from __future__ import annotations
 
+import json
+import os
 import time
+from pathlib import Path
 
 import numpy as np
 from numba import prange
@@ -78,7 +81,7 @@ class SampledRangeCFR(IterativeSolver):
         self.T = len(pt.templates)
         if pt.num_streets != self.T - 1:
             raise ValueError("pt must hold every street except the last")
-        self.batch, self.samples = batch, samples
+        self.batch, self.samples, self.seed = batch, samples, seed
         self.rng = np.random.default_rng(seed)
         self.t = 0
         self.solve_seconds = 0.0
@@ -218,13 +221,71 @@ class SampledRangeCFR(IterativeSolver):
         return {"iteration": self.t, "wall_time": self.solve_seconds,
                 **exact_exploitability(self.pt, self.last, self.abs, self.average_strategy())}
 
+    # Checkpoints ------------------------------------------------------------------------
+
+    _SCALARS = ("t", "solve_seconds", "value", "rng", "batch", "samples", "seed")
+
+    def _arrays(self) -> dict:
+        """Every regret, average and strategy array, keyed by name, street and node."""
+        return {f"{name}_t{t}_k{k}": a for name in ("regret", "cum", "sigma")
+                for t, row in enumerate(getattr(self, name)) for k, a in enumerate(row)}
+
+    def save(self, path) -> None:
+        """Write the full state to one .npz: every regret, average and strategy array (the
+        strategy itself, not recomputed, so a resumed run is bit-identical), t, solve_seconds,
+        value, the random generator's state (as JSON), batch, samples and seed. Uncompressed,
+        since checkpoints are large. It goes to a temporary file that is then renamed, so a
+        crash never leaves a half-written checkpoint."""
+        path = Path(path)
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "wb") as f:
+            np.savez(f, t=self.t, solve_seconds=self.solve_seconds, value=np.array(self.value),
+                     rng=np.array(json.dumps(self.rng.bit_generator.state)), batch=self.batch,
+                     samples=self.samples, seed=np.array(json.dumps(self.seed, default=int)), **self._arrays())
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    def load(self, path) -> None:
+        """Restore a state written by save() into this solver, which must be built with the
+        same public tree, last street and abstraction (batch, samples and seed are restored
+        from the file). Refuses with a ValueError, before changing anything, if the file's
+        arrays differ from this solver's in number or shape."""
+        want = self._arrays()
+        with np.load(path) as z:
+            missing = [key for key in self._SCALARS if key not in z.files]
+            names = {key for key in z.files if key not in self._SCALARS}
+            if missing or names != set(want):
+                raise ValueError(f"{path}: not a checkpoint of this solver: it has {len(names)} arrays and this "
+                                 f"solver {len(want)}{f', and it lacks {missing}' if missing else ''}")
+            arrays = {}
+            for key, a in want.items():
+                b = z[key]
+                if b.shape != a.shape or b.dtype != a.dtype:
+                    raise ValueError(f"{path}: {key} is {b.shape} {b.dtype} in the checkpoint but {a.shape} "
+                                     f"{a.dtype} in this solver: built with another public tree or abstraction?")
+                arrays[key] = b
+            scalars = {key: z[key] for key in self._SCALARS}
+        for name in ("regret", "cum", "sigma"):
+            setattr(self, name, [[arrays[f"{name}_t{t}_k{k}"] for k in range(len(row))]
+                                 for t, row in enumerate(getattr(self, name))])
+        self.t = int(scalars["t"])
+        self.solve_seconds = float(scalars["solve_seconds"])
+        self.value = [float(v) for v in scalars["value"]]
+        self.rng.bit_generator.state = json.loads(str(scalars["rng"]))
+        self.batch, self.samples = int(scalars["batch"]), int(scalars["samples"])
+        self.seed = json.loads(str(scalars["seed"]))
+
 
 # Exact evaluation, streaming the last street ------------------------------------------------
 
 
-def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 256) -> dict:
+def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 256, progress=None,
+                         progress_every: int = 1) -> dict:
     """Best responses and value of a stored strategy in the full game, every last-street
-    deal included, streamed `chunk` deals at a time so memory stays bounded."""
+    deal included, streamed `chunk` deals at a time so memory stays bounded. If given,
+    progress(chunks done, total chunks) is called every `progress_every` chunks and after
+    the last, so long evaluations can log an ETA."""
     T = len(pt.templates)
     D1 = pt.streets[-1].num_deals
     hsig_upper = [list(row) for row in sigma[:T - 1]]
@@ -235,7 +296,8 @@ def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 
     agg = [np.zeros(pt.shape(T - 2) + (pt.templates[T - 2].num_closes,)) for _ in jobs]
     agg = [np.moveaxis(a, 3, 2) for a in agg]  # (D1, L, closes, H)
     total = D1 * last.num_children
-    for lo in range(0, total, chunk):
+    num_chunks = -(-total // chunk)
+    for done, lo in enumerate(range(0, total, chunk), 1):
         flat = np.arange(lo, min(total, lo + chunk))
         parents, children = np.divmod(flat, last.num_children)
         st = last.street(parents, children)
@@ -247,6 +309,8 @@ def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 
         for j, (p, mode) in enumerate(jobs):
             V, _ = street_values(tp_last, st, pt.contrib[T - 1], hsig, nodes, p, mode, True)
             agg[j] += close_values(V[0], st.parent, D1, pt.templates[T - 2].num_closes)
+        if progress is not None and (done % progress_every == 0 or done == num_chunks):
+            progress(done, num_chunks)
     out = []
     for j, (p, mode) in enumerate(jobs):
         a = agg[j]

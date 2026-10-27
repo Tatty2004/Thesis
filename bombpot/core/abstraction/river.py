@@ -14,6 +14,10 @@ Methods:
 """
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import numpy as np
 
 from bombpot.core.abstraction.bucketing import kmeans
@@ -29,13 +33,35 @@ def features(street, method: str) -> np.ndarray:
 
 class EquityBuckets:
 
-    def __init__(self, centers: np.ndarray, method: str):
-        """centers: (num_parents, k, dim), weakest first."""
+    def __init__(self, centers: np.ndarray, method: str, fit: dict | None = None):
+        """centers: (num_parents, k, dim), weakest first. fit: how they were fitted (samples,
+        seed, restarts), kept as metadata."""
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         self.centers, self.method = centers, method
         self.num_rows, self.k = centers.shape[:2]
         self.num_ids = self.k + 1
+        self.fit = dict(fit or {})
+
+    def save(self, path) -> None:
+        """Centers, method and k, plus the fit's metadata, in one .npz (written to a temporary
+        file, then renamed)."""
+        path = Path(path)
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "wb") as f:
+            np.savez(f, centers=self.centers, method=np.array(self.method), k=self.k,
+                     fit=np.array(json.dumps(self.fit, default=str)))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    @classmethod
+    def load(cls, path) -> "EquityBuckets":
+        with np.load(path) as z:
+            out = cls(z["centers"], str(z["method"]), json.loads(str(z["fit"])))
+            if out.k != int(z["k"]):
+                raise ValueError(f"{path}: k is {int(z['k'])} but the centers hold {out.k}")
+        return out
 
     def rows(self, parents, children) -> np.ndarray:
         return np.asarray(parents)
@@ -64,4 +90,4 @@ def fit_equity_buckets(last, num_parents: int, method: str, k: int, samples: int
         found = found[np.argsort(found.mean(axis=1), kind="stable")]
         # Fewer distinct points than k: repeat the strongest center (ids past it stay unused).
         centers[parent] = np.vstack([found, np.repeat(found[-1:], k - len(found), axis=0)])
-    return EquityBuckets(centers, method)
+    return EquityBuckets(centers, method, {"samples": samples, "seed": seed, "restarts": restarts})
