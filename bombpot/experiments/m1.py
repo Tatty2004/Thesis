@@ -319,11 +319,12 @@ def retain(folder: Path, milestones, log) -> None:
             entries.append((t, float(z["solve_seconds"]) / 3600))
         paths[t] = p
     keep = keep_set(entries, milestones)
+    hours = dict(entries)
     for t, p in paths.items():
         if t not in keep:
             p.unlink()
             p.with_suffix(".json").unlink(missing_ok=True)
-            log(f"retention: deleted {p.name}")
+            log(f"retention: deleted {p.name} ({hours[t]:.6f} h of solving)")
 
 
 def health_check(solver: SampledRangeCFR, avg: list, previous_t: int) -> dict:
@@ -422,8 +423,8 @@ def cmd_solve(args) -> int:
         info["flop_p0_bet"] = flop_report(game, pt, avg, run["flop_hands"])
         del avg
         write_json(path.with_suffix(".json"), info)
-        log(f"saved {path.name}: {info['bytes'] / 2**30:.2f} GiB in {info['save_seconds']:.1f} s; "
-            f"player 0's flop bet frequency {info['flop_p0_bet']}")
+        log(f"saved {path.name} ({solver.solve_seconds / 3600:.6f} h of solving): {info['bytes'] / 2**30:.2f} GiB in "
+            f"{info['save_seconds']:.1f} s; player 0's flop bet frequency {info['flop_p0_bet']}")
         saved.append(info)
         last_saved_t = solver.t
         retain(folder, run["milestone_hours"], log)
@@ -452,7 +453,8 @@ def cmd_solve(args) -> int:
     summary = {"event": "end", "time": now(), "t": solver.t, "iterations": n, "first_iteration_seconds": first,
                "seconds_per_iteration": per_it, "river_deals_per_second": solver.batch * solver.samples / per_it,
                "solve_hours": solver.solve_seconds / 3600, "peak_gb": peak,
-               "checkpoints": [{k: c[k] for k in ("checkpoint", "t", "bytes", "save_seconds")} for c in saved]}
+               "checkpoints": [{k: c[k] for k in ("checkpoint", "t", "solve_seconds", "bytes", "save_seconds")}
+                               for c in saved]}
     log(f"stopped at t {solver.t}: {n} iterations here, {per_it:.3f} s/it after the first, "
         f"{summary['river_deals_per_second']:.1f} river deals/s, peak {peak:.2f} GB")
     if args.resume_check:
