@@ -2,7 +2,7 @@
 
 Current step: 3, Fit the real-deck buckets
 Last passed gate: 2, 05:02, commit `f27de52` (code), status `1442a1c`+
-Running jobs: (being submitted, see 05:03)
+Running jobs: fits 31994725 (kmeans_2d, node204, submitted 05:01, about 1.3 h, ends about 06:25) and 31994726 (avg_1d, node204, about 10 min)
 Next action: submit Step 3's two fits, then judge Gate 3 from fit_checks.json
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
@@ -119,3 +119,10 @@ Code at `f27de52` (no code changes since the rehearsal), all jobs on node010 (Go
 - **Health checks:** all PASS: 16 in the rehearsal, 2 in the twins, 10 in the retention recheck. No FAIL anywhere.
 - **Retention:** recheck 31994703 (budget stop at t 3001) then 31994704 (`--resume`, to t 5961), both COMPLETED. `m1_check_retention.py results/m1/m1_smoke/solve-retention`: rule keeps [1335, 2708, 4993, 5673, 5961], on disk the same, every one of the 5 deletions as the rule says, **match: True**. Milestones 0.02/0.04/0.08 h kept t 1335/2708/4993, and the rule held across the resume. This supersedes the unverifiable t 882 deletion in `m1_smoke_lossless/solve` (old logs lacked hours).
 - Disk: `results/m1` 1.6 GB.
+
+### 05:01, Step 3: fits submitted
+- Push: still blocked (no agent at `/tmp/rb5709-m1-agent.sock`), so `4b4023a` and earlier are local only.
+- `sbatch -w node208` was refused ("Requested node configuration is not available"). `--test-only` shows the scheduler places `all` jobs on node202–204 through the `cs` node set, which doesn't include node205–208, so node208 can't be targeted. node204 (Gold 5320, same type as the pilot nodes) was accepted. node202 and node302 stay free for the pilot.
+- 31994725: `m1_fit.sbatch --config m1_kmeans2d.yaml` (4 CPUs, 8G, 4 h), node204.
+- 31994726: `m1_fit.sbatch --config m1_avg1d.yaml` (4 CPUs, 8G, 1 h), node204.
+- Commit `4b4023a` (clean `bombpot/`).
