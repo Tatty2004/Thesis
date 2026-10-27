@@ -1,9 +1,9 @@
 # M1 status
 
-Current step: 1, Save and resume the sampled solver
-Last passed gate: 0, 03:31, commit `65bd6c3`
-Running jobs: 31994580, full test suite (Gate 1), submitted 03:45, about 20 min; 31994581, `test_holdem_river.py --runslow` (Gate 1), submitted 03:45, about 5 min
-Next action: judge Gate 1 when both jobs end; meanwhile draft `m1.py` in the scratchpad (not in the repo, which the tests read)
+Current step: 2, The M1 run script, rehearsed on the small deck
+Last passed gate: 1, 03:55, commit `2cf050f`
+Running jobs: none
+Next action: test `m1.py` locally, commit it, then run the rehearsal through the Slurm scripts
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -57,3 +57,13 @@ Job 31994378 on node202 (Xeon Gold 5320, 104 threads), commit `ec589c6` (after t
   - a mismatched load is refused and changes nothing;
   - progress callback.
 - Jobs: 31994580 runs the full suite. 31994581 runs `test_holdem_river.py --runslow`, needed because `exact_exploitability` changed.
+
+### 03:55, Gate 1: PASS
+- New tests pass: all 10 in `test_holdem_checkpoint.py`, on node009 (in the full run below) and on spin.
+- Full suite on a compute node: job 31994580 (node009, clean `2cf050f`): **397 passed, 21 skipped** (the slow tests, as intended without `--runslow`), 10 min 54 s. No failures or errors.
+- `exact_exploitability` changed, so `tests/holdem/test_holdem_river.py --runslow` ran: job 31994581 (node010, `2cf050f`), **12 passed**, including the slow convergence test.
+- Commit: `2cf050f` (code), plus status commits. **Not pushed:** the SSH key is still locked (no agent at `/tmp/rb5709-m1-agent.sock`).
+
+### Measured on spin (Xeon Silver 4316) for sizing
+- Real-deck bucket fit, k = 200, 50 rivers: **kmeans_2d 2.27 s per turn deal** (about 1.3 h for 2,070), **avg_1d 0.25 s** (about 9 min). The fit is sequential (one generator through the turn deals), so `m1_fit.sbatch` asks for 4 CPUs, not 64.
+- Real-deck layout: flop, turn and river templates have 1, 5 and 25 entering lines and 14 actions over 6 nodes. Regret, average and strategy are about 2.4 GB each once every turn deal has been sampled, so **a checkpoint is about 7.1 GB**, uncompressed (the pilot will measure it).
