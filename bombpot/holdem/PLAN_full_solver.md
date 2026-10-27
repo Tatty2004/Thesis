@@ -20,7 +20,14 @@ Option (c) has three parts:
 
 ## Fixed decisions (don't revisit without the user)
 
-- **Betting:** limit, ante 1, bets [2, 4, 4], at most a bet and one raise per street. This is the `Holdem` default.
+- **Betting: two games.**
+  - **Limit:** ante 1, bets [2, 4, 4], at most a bet and one raise per street (the `Holdem` default). Used for the large grouping comparisons, where exact checks are cheap and the result is clean.
+  - **Pot-limit with real sizes** (decided 2026-10-27), for a few headline solves:
+    - antes 1 each (a pot of 2) and stacks of 20 behind, a stack-to-pot ratio of 10;
+    - bets and raises of ½ pot or pot;
+    - at most a bet and two raises per street (provisional: confirm in B3).
+
+    It's built in steps B1–B5.
 - **The turn stays exact.** Only the river is grouped.
 - **Stack:** the package is `bombpot`, and numba is part of the stack.
 - **River grouping methods:**
@@ -59,7 +66,63 @@ Option (c) has three parts:
 - **The river abstraction has imperfect recall.** Averages add up the own reach of all of an infoset's hands. That differs from the perfect-recall buckets in `RangeCFR`, which take the mean.
 - **OpenSpiel's `universal_poker`** information string isn't perfect recall across rounds (see the root CLAUDE.md).
 
+## Ionic (measured 2026-10-27)
+
+- **Access:** log in at `cycles.cs.princeton.edu`. Jobs go through Slurm, under account `allcs`.
+- **Partitions:**
+  - `cs`: 6 nodes, 104 threads and 503 GB each.
+  - `all`: 50 nodes, 40–128 threads and 220–503 GB.
+  - `lowprio`: the same nodes as `all`, but jobs can be preempted.
+
+  Jobs are limited to 7 days. CPU-only jobs that asked for `cs` landed in `all`.
+- **Slurm CPUs are hyperthreads.** `--cpus-per-task=8` gets 4 physical cores. R4 took 5.6 s per iteration there (2019 Xeon Gold 5218), against 2.7 s on the laptop. Request more CPUs, sized from the S0 scaling test.
+- **Python:** the system Python is 3.9. Modules provide 3.13 (anaconda3/2025.12), and `.venv` uses 3.13.9, not 3.11.
+- **Storage:**
+  - Home has a 5 GB quota: keep only code, the venv and logs there.
+  - Large outputs go to `/n/fs/scratch/rb5709`: shared 10 TB, purge policy unknown, assume not backed up. Point `results/` there with a symlink.
+  - Ask the user whether project space has been granted. Keep final results there, or copy them back to the laptop.
+
 ## Steps
+
+**Order of work:**
+1. S0, then M1.
+2. S1, S2 and S3.
+3. S5, then S6.
+
+B1–B3 (real bet sizes) can be built on the laptop while M1 runs on Ionic.
+
+### S0. Ionic checks and scaling test (Ionic)
+
+- **Checks (started 2026-10-27):**
+  - the full test suite, with `--runslow`, on a compute node;
+  - R4 (`configs/holdem/flop_turn.yaml`), which must reproduce exploitability 5.17e-4 and value −0.062097 at 200 iterations.
+- **Scaling test:**
+  - Run the R4 game for about 25 iterations at 8, 16, 32 and 64 CPUs (and a whole node if possible).
+  - Record seconds per iteration and peak memory.
+  - Use the result to choose the CPUs for every later job, and report it.
+
+### M1. First real-deck three-street solve, limit (before S1)
+
+The goal is the first exploitability number for actual double-board Hold'em. M1 also measures the speed and the iterations to converge, which every later budget depends on. It uses only verified code plus new plumbing.
+
+1. **Plumbing (new code).** Test it on the small deck first.
+   - Save and load the solver's full state (regrets, averages, iteration count, RNG state) and its average strategy.
+   - A run script: fit buckets, solve without logging, and checkpoint every N iterations.
+   - An evaluation script: load a saved strategy and run `exact_exploitability`.
+
+   **Acceptance:**
+   - A saved and reloaded strategy grades exactly as the in-memory one.
+   - Resuming from a checkpoint continues bit-identically to a run that was never interrupted.
+2. **Fit river buckets** for all 2,070 turn deals with `fit_equity_buckets`, using k = 200 (provisional) and 50 rivers each. Measured on the laptop: 1.7 s per turn deal, about 1 h in all.
+3. **Solve** with `kmeans_2d`, and with `avg_1d` too if the user agrees to the compute.
+   - Measured on the laptop: 7.5 s per iteration at batch 64 × 4 rivers (2.9 GB).
+   - The number of iterations needed is unknown.
+4. **Run the exact check on several checkpoints,** each in its own job, running in parallel. At k = 200 each takes about 21 h at laptop speed. The checkpoints show convergence, and the last one is the result.
+
+**Measured cost:** at k = 200, the bucket lookup takes about 2 s per 256 river deals (0.18 s at k = 16). That's about a quarter of an iteration and 40% of an exact check. A compiled lookup is optional performance work: ask first.
+
+**Stop and report after M1.**
+
 
 ### S1. Safe river re-solver (laptop)
 
@@ -161,9 +224,38 @@ Note: no grouping that shares a row across river cards can reproduce the exact g
 
 A small CLI or function. Given a flop pair, a turn, a river and a betting history, it returns the exact river strategy (from S1), starting from a saved full-game strategy.
 
+This is the real-time river solve. It re-solves one river for one betting history, which is a small game:
+- one pair of boards;
+- about 861 hands per player;
+- one river betting tree.
+
+It should take seconds, whatever the bet sizes. It is not the exact check, which has to grade every river under every history.
+
+### Real bet sizes: B1–B5
+
+The game is the pot-limit one under Fixed decisions.
+
+Size estimates come from a rough count, not from the repo's engine, so confirm them in B3:
+- **Flop and turn:** about 10× the limit game, about 46 GB.
+- **River:** about 7×. An exact check takes about 6 days at laptop speed, about a day on one node if the code scales.
+
+- **B1. Betting engine in `core/`,** game-agnostic.
+  - It supports bet sizes as fractions of the pot, stacks, all-in and a raise cap, with pot-limit or no-limit as a setting. `LimitPoker` must keep working.
+  - **Acceptance:**
+    - No-limit with {pot} matches OpenSpiel's `universal_poker` (no-limit, betting abstraction `fcpa`) on one board: the same legal actions, histories and payoffs.
+    - Pot-limit, on small decks: DCFR converges to the LP value.
+    - All existing tests pass.
+- **B2. The range solver and public tree with these rules,** including all-in lines, which have no betting on later streets.
+  - **Acceptance:**
+    - Lockstep agreement with the tree solver on small decks.
+    - The LP value matches.
+- **B3. Count the real sizes** with the engine (extend `scripts/count_sizes.py`). Confirm the menu and raise cap with the user.
+- **B4. Real-deck flop and turn with real sizes,** solved exactly and full-width on one node.
+- **B5. All three streets with real sizes,** using M1's pipeline. This needs S3's split exact check.
+
 ## Open decisions (ask the user)
 
-1. Ionic's specs, which set the S5 deck size.
+1. ~~Ionic's specs~~ Known (see Ionic): nodes have up to 503 GB, so S5 can use the 7 × 4 deck.
 2. The S5 grid: methods, k values, seeds and flop pairs.
 3. For S6, how many flop pairs.
 4. Whether to add richer river features (the optional part of S2).

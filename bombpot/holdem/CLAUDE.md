@@ -152,6 +152,6 @@ The full solver ("option c", agreed 2026-10-06) is planned step by step in [PLAN
 Each step comes with acceptance tests and stop points. Read it before starting that work.
 
 ## Open decisions
-1. ~~Bet sizes for the real game.~~ **Decided 2026-10-06:** limit betting with ante 1, bets [2, 4, 4] (pot-sized on the flop, doubled on turn and river) and at most a bet and one raise per street. This is now `Holdem`'s default; two-street games keep [2, 4], so the R4 run stands. Limit keeps measured exploitability down to card bucketing alone; pot-limit menus wait for PLO.
+1. ~~Bet sizes for the real game.~~ **Decided 2026-10-06:** limit betting with ante 1, bets [2, 4, 4] (pot-sized on the flop, doubled on turn and river) and at most a bet and one raise per street. This is now `Holdem`'s default; two-street games keep [2, 4], so the R4 run stands. Limit keeps measured exploitability down to card bucketing alone, so it's used for the large grouping comparisons. **Real bet sizes (decided 2026-10-27)** are for a few headline runs: pot-limit, bets and raises of ½ pot or pot, stacks of 20 behind a 2-chip pot. They're built in PLAN_full_solver.md, steps B1–B5.
 2. **The river abstraction:** equity buckets per turn deal (imperfect recall, the usual choice in poker solvers). Built and tested, but it shapes what the thesis can claim. Needs sign-off.
 3. **Where the layer ends:** R4, or R5 as well. A real-deck R5 solve and its exact evaluation take many hours (see R5).
