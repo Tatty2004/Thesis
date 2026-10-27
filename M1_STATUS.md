@@ -2,8 +2,8 @@
 
 Current step: 2, The M1 run script, rehearsed on the small deck
 Last passed gate: 1, 03:55, commit `2cf050f`
-Running jobs (all submitted 04:36, minutes each, pinned to node010): m1_smoke fit 31994672, solve 31994673, resume 31994674; m1_smoke_lossless fit 31994675, solve 31994676, resume 31994677; tests 31994678 (`test_m1.py`, checkpoint tests, rules)
-Next action: when the resumes end, submit the uninterrupted twins (`--tag straight --iterations <final t>`) and evaluations of two checkpoints per config, then judge Gate 2
+Running jobs (submitted 04:45, minutes each, node010): uninterrupted twins 31994695 (m1_smoke, to t 5453) and 31994696 (m1_smoke_lossless, to t 4683); evaluations 31994697 (lossless t 1807), 31994698 (lossless t 4683), 31994699 (smoke t 1235), 31994700 (smoke t 5453, after 31994697)
+Next action: when they end, check Gate 2: compare the twins bit for bit, evaluate equal to in-process, values in range, health and retention
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -92,3 +92,14 @@ Job 31994378 on node202 (Xeon Gold 5320, 104 threads), commit `ec589c6` (after t
   - node020–026 and node10x: Gold 5220R;
   - node403: Gold 6338;
   - node9xx: Silver 4214.
+
+### 04:45, rehearsal phase A done, phase B submitted
+- Fits (jobs 31994672, 31994675): `m1_smoke` checks **all PASS**, including `one_call_identical` (the per-turn-deal fit equals one `fit_equity_buckets` call) and a clean git hash. Lossless: nothing to fit.
+- Walltime guard works in Slurm: "budget ends 04:40:43, the job's walltime 05:17:05: 36 min apart".
+- Solves stopped by their 3.6-minute budget, then `--resume`d:
+  - `m1_smoke`: t 2733, then t 5453 (0.07 s/it).
+  - `m1_smoke_lossless`: t 2292, then t 4683 (0.08 s/it).
+  - All health checks PASS.
+  - Lossless in-process exact exploitability falls: 0.199 → 0.074 → 0.056 → 0.041 → 0.032.
+- Tests on a compute node (job 31994678): `test_m1.py`, the checkpoint tests and the rules, **19 passed**.
+- Added `m1.py check --checkpoint P` (loads into a fresh solver, health check, flop strategy), for Gate 5's "the checkpoint loads". Commit `fdec2b7`.
