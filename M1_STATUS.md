@@ -2,8 +2,8 @@
 
 Current step: 4, Real-deck pilot
 Last passed gate: 3, 06:18, commit `af52b9b` (code, both fits)
-Running jobs: none
-Next action: Step 4: fetch and merge main, then submit the pilot
+Running jobs (submitted 06:17): main pilot 31994796 (node202, ends about 07:10, incl. resume check); timing chain on node204 31994797 → 31994798 → 31994799 → 31994800 (about 20 min each, ends about 07:40)
+Next action: when 31994796 ends, submit the exact-check timing (m1_eval, --max-minutes 20) on its newest checkpoint; judge Gate 4 when all are done
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -150,3 +150,16 @@ kmeans_2d: job 31994725, node204, COMPLETED in 1 h 15 min: 4,148 s to fit (2.00 
 
 - **Occupancy, reported not judged:** both methods leave most of their 200 buckets empty at any one river deal. On average 861 hands share about 53 (kmeans_2d) or 72 (avg_1d) occupied buckets. The centers are fitted per turn deal over 50 sampled rivers, and one river concentrates the hands' equities, so this may be expected. It does mean the effective number of river buckets per deal is far below 200. **Worth the user's look before reading much into k = 200.**
 - Disk: `results/m1` 1.6 GB (the buckets are small).
+
+### 06:17, Step 4: merge, pilot submitted
+- **Merge:** fetched `main` over HTTPS: no commits beyond `m1`'s base, so the merge is a no-op. No changes, so no retest was needed (the gate's retest applies only "if the merge brought changes").
+- Push: still blocked.
+- **node302 can't be targeted** (same refusal as node208). The timing runs went to node204 (Gold 5320) instead. node204 has another user's job on 20 of its CPUs, so all four settings, b64-t32 included as their own baseline, run there one after another and are compared with each other. The main pilot runs on idle node202.
+- Jobs, all with `m1_kmeans2d.yaml` from clean `c99a877` (code `af52b9b`):
+  - 31994796, main pilot: `THREADS=32 sbatch -w node202 --time=01:45:00 --mem=48G m1_solve.sbatch --tag pilot --budget-hours 0.75 --checkpoint-hours 0.25 --resume-check 2`. The scheduler placed it in partition `cs` (not preemptible).
+  - Timing chain, each `-w node204 --time=00:50:00 --mem=48G`, `--budget-hours 0.25 --checkpoint-hours 1`, each after the previous one (`afterany`):
+    - 31994797 `THREADS=64 --tag pilot-b64-t64`
+    - 31994798 `THREADS=32 --tag pilot-b64-t32`
+    - 31994799 `THREADS=32 --batch 256 --tag pilot-b256-t32`
+    - 31994800 `THREADS=64 --batch 256 --tag pilot-b256-t64`
+- At most 2 solve jobs run at once.
