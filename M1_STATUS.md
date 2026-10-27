@@ -2,8 +2,8 @@
 
 Current step: 5, Launch the long solves
 Last passed gate: 4, 07:32, commit `af52b9b` (code)
-Running jobs: none (submitting Step 5)
-Next action: submit the two long solves
+Running jobs (submitted 07:30, 3-day walltime, budget 71.5 h, so expected end about 2026-10-30 07:00): long solve 31994837 (m1_kmeans2d, node202), long solve 31994838 (m1_avg1d, node204)
+Next action: Gate 5 at each solve's first checkpoint (about 09:30), then the Step 7 report, then stop
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -200,3 +200,13 @@ kmeans_2d: job 31994725, node204, COMPLETED in 1 h 15 min: 4,148 s to fit (2.00 
 - **Memory request for Step 5:** twice the pilot's peak. The largest measured is MaxRSS 24.2 GB (it includes the resume check; a plain solve measured 16.5 GB), so **`--mem=50G`**.
 - Disk: `results/m1` 34 GB (pilot and timing checkpoints, 6.6 GB each). Scratch has 2.3 TB free.
 - No merge changes, so the Step 1–2 tests didn't need rerunning.
+
+### 07:30, Step 5: long solves submitted
+Gates 0–4 all passed and the pilot is inside rule 7, so per the user's instruction (03:28) both long solves are launched. Step 6 (exact checks) is **not** started.
+- 31994837: `THREADS=32 sbatch -w node202 --time=3-00:00:00 --mem=50G scripts/ionic/m1_solve.sbatch --config bombpot/experiments/configs/holdem/m1_kmeans2d.yaml`
+- 31994838: the same, `-w node204`, `--config .../m1_avg1d.yaml`
+- No overrides: the configs give batch 64 × 4, seed 0, `budget_hours: 71.5`, `checkpoint_hours: 2`, milestones 2/4/8/16/32/64 h. Run folders `results/m1/m1_kmeans2d/solve/` and `results/m1/m1_avg1d/solve/`.
+- Clean commit `a7d7121` (code `af52b9b`).
+- **Expected disk:** each solve keeps at most 2 newest + 6 milestone checkpoints × 6.6 GiB ≈ 53 GiB, about 106 GiB for both, plus 34 GB already there. Under 300 GB.
+- If one reaches its walltime: resubmit once with `--resume`. (Expected about 2026-10-30 07:00, after this session.)
+- avg_1d hasn't been piloted itself. Its arrays are the same shape (k = 200), so it's judged against the pilot's 7.15 s/it.
