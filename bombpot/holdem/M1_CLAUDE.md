@@ -1,18 +1,20 @@
 # M1 overnight: instructions for Claude on Ionic
 
-Written 2026-10-27 for an unattended overnight session on Ionic. The goal is to build, verify and launch **M1**: the first full solve of real double-board Hold'em on the 52-card deck (flop, turn and river, both boards) for one pair of flops, with its exploitability measured exactly.
+Written 2026-10-27 for an unattended overnight session on Ionic. **M1** is the first full solve of real double-board Hold'em on the 52-card deck (flop, turn and river, both boards) for one pair of flops, with its exploitability measured exactly.
+
+**Tonight covers Steps 0–4:** everything up to, but not including, the long solves. After Step 4's gate, write the report (Step 7) and stop. Steps 5 and 6 (the multi-day solves and the exact checks) start only after the user has reviewed the night's results and says go.
 
 First read the root `CLAUDE.md`, `bombpot/holdem/CLAUDE.md`, and the "Ionic" and "M1" sections of `bombpot/holdem/PLAN_full_solver.md`. This file adds the step-by-step procedure and the checks each step must pass before the next one starts.
 
 ## What a successful night looks like
 
-A solve runs for days and an exact check takes many hours, so M1 can't *finish* overnight. By morning:
-1. Save/resume and the M1 run scripts are written, tested, committed and pushed (branch `m1`).
-2. The whole pipeline has run end to end on the small deck and on a short real-deck pilot, with every check passing.
-3. River buckets are fitted for all 2,070 turn deals.
-4. The long solves are running on Ionic, writing healthy checkpoints.
-5. The exact check of an early checkpoint has been submitted.
-6. `logs/m1/STATUS.md` says what passed, the key numbers, the job ids, and what's still running.
+By morning:
+1. Save/resume and the M1 run scripts are written, tested, and pushed on branch `m1`, one push per step.
+2. The whole pipeline has run end to end on the small deck, with every check passing.
+3. River buckets are fitted for all 2,070 turn deals, for both methods.
+4. A short real-deck pilot has run, with its measurements: speed, memory, the CPU choice, and the projected time for a long solve and an exact check.
+5. `M1_STATUS.md` says what passed, the key numbers, and what the long run would need.
+6. No long jobs are running.
 
 ## Fixed choices (don't change these)
 
@@ -28,13 +30,15 @@ A solve runs for days and an exact check takes many hours, so M1 can't *finish* 
 
 ## Ground rules for working unattended
 
-1. **Steps in order.** Each step ends in a **gate**: a list of checks. Go on to the next step only if every check passes. Record each gate in `logs/m1/STATUS.md`: time, PASS or FAIL, the numbers, and job ids.
+1. **Steps in order.** Each step ends in a **gate**: a list of checks. Go on to the next step only if every check passes. Record each gate in `M1_STATUS.md`: time, PASS or FAIL, the numbers, and job ids.
 2. **When a check fails:**
    - Diagnose it. You may fix code *you wrote tonight*, then rerun the whole gate.
    - Never change an existing test, never loosen a check, and never change the behavior of existing verified code. Additive changes, such as a new optional argument whose default keeps today's behavior, are fine if the full test suite still passes.
-   - If a gate still fails after two honest attempts, or the fix needs a decision from the user: **stop.** Write what you found in `STATUS.md`, leave anything already running alone, and end the session.
+   - If a gate still fails after two honest attempts, or the fix needs a decision from the user: **stop.** Write what you found in `M1_STATUS.md`, leave anything already running alone, and end the session.
 3. **Git:**
-   - Work on a branch `m1` made from up-to-date `main`. Commit at every passing gate, and push the branch.
+   - Work on a branch `m1` made from up-to-date `main`.
+   - **Push at the end of every step:** commit the step's code and `M1_STATUS.md`, then `git push origin m1`. Also push `M1_STATUS.md` after every job submission, so the user can follow along on GitHub.
+   - `M1_STATUS.md` lives at the repo root on branch `m1`. Results, checkpoints and logs never go into git.
    - Never push to `main` and never force-push.
    - Launch real-deck jobs only from a clean, committed state, and record the git hash in every run folder.
 4. **Storage:**
@@ -57,7 +61,7 @@ A solve runs for days and an exact check takes many hours, so M1 can't *finish* 
 
 The session may run out of context and be summarized, hit a usage limit, or be restarted by the user. The real state of the run is on disk and in Slurm, so:
 
-1. **`logs/m1/STATUS.md` is the source of truth.** Keep this block at its top, and update it at every gate and every job submission:
+1. **`M1_STATUS.md` is the source of truth.** Keep this block at its top, and update it at every gate and every job submission:
    ```
    Current step: <n and name>
    Last passed gate: <n>, <time>, commit <hash>
@@ -65,16 +69,16 @@ The session may run out of context and be summarized, hit a usage limit, or be r
    Next action: <one line>
    ```
    Add the detailed, timestamped entries below it.
-2. **After a summary or a restart, re-read this file and `STATUS.md` before doing anything.** Then confirm the state from the system itself: `git log --oneline -5`, `git status`, `squeue -u $USER`, and the run folders under `results/m1/`.
+2. **After a summary or a restart, re-read this file and `M1_STATUS.md` before doing anything.** Then confirm the state from the system itself: `git log --oneline -5`, `git status`, `squeue -u $USER`, and the run folders under `results/m1/`.
    - Never resubmit a job that's already running or finished.
    - Never redo a passed gate's side effects.
-   - If `STATUS.md` and the system disagree, trust the system, correct `STATUS.md`, and say so in it.
+   - If `M1_STATUS.md` and the system disagree, trust the system, correct `M1_STATUS.md`, and say so in it.
 3. **Keep the context small:**
    - Read logs with `tail` and `grep`, never whole.
    - Don't print large arrays or full test output: use `pytest -q` and look at failures only.
    - Read large files in parts.
-4. **Stay inside the task.** Do only what the steps below say. Don't refactor, tidy or improve code outside M1, start other plan steps, or explore side questions. If something outside M1 looks wrong, note it in `STATUS.md` for the user and carry on.
-5. **When unsure, stop.** If you're unsure whether an action is allowed, or the situation doesn't match these instructions, write what you see in `STATUS.md` and stop. A stopped run costs a few hours; a wrong multi-day run costs days.
+4. **Stay inside the task.** Do only what the steps below say. Don't refactor, tidy or improve code outside M1, start other plan steps, or explore side questions. If something outside M1 looks wrong, note it in `M1_STATUS.md` for the user and carry on.
+5. **When unsure, stop.** If you're unsure whether an action is allowed, or the situation doesn't match these instructions, write what you see in `M1_STATUS.md` and stop. A stopped run costs a few hours; a wrong multi-day run costs days.
 
 ## Step 0: Starting point
 
@@ -86,7 +90,7 @@ The session may run out of context and be summarized, hit a usage limit, or be r
 - **The full test suite with `--runslow`** must pass on this commit (`scripts/ionic/tests.sbatch --runslow`). If that run hasn't happened, run it.
 
 **Gate 0:**
-- The scaling table is recorded, and the CPU choice is written in `STATUS.md`.
+- The scaling table is recorded, and the CPU choice is written in `M1_STATUS.md`.
 - Every test passes.
 - `results/` resolves to scratch.
 
@@ -194,13 +198,13 @@ Submit `m1_solve.sbatch` with `m1_kmeans2d.yaml` and a 45-minute time budget, ch
 - Resume is bit-identical on the real deck.
 - Health checks pass.
 - The numbers are inside rule 7's limits.
-- Write in `STATUS.md`:
+- Write in `M1_STATUS.md`:
   - the chosen batch;
   - seconds per iteration;
   - the projected hours per pass over all 2,070 turn deals;
   - the projected exact-check time.
 
-## Step 5: Launch the long solves
+## Step 5: Launch the long solves (not tonight: only after the user says go)
 
 Submit one `m1_solve.sbatch` per method:
 - the chosen CPUs and `--mem` at twice the pilot's peak;
@@ -225,7 +229,7 @@ If a solve reaches its walltime, resubmit it with `--resume`. Resubmit at most o
 
 Also log player 0's overall flop bet frequency. The user will judge whether these look sensible.
 
-## Step 6: Exact checks
+## Step 6: Exact checks (not tonight: only after the user says go)
 
 Once each solve has a checkpoint from about 2 hours of solving, submit `m1_eval.sbatch` on it:
 - walltime 1.5× the Step 4 ETA, at most 7 days;
@@ -238,17 +242,24 @@ Overnight, submit at most one evaluation per method. Later checkpoints (8, 16, 3
 - The game value lies between −BR1 and BR0 (allowing 1e-9).
 - `eval.json` records a clean git hash and the checkpoint's iteration.
 
-## Step 7: Morning report
+## Step 7: Morning report (tonight: right after Gate 4)
 
-Finish `logs/m1/STATUS.md` with a short summary, in plain language:
-- which gates passed;
-- the commits;
-- for each solve: iterations so far, seconds per iteration, checkpoints, job id, time left;
-- the exact-check results so far, or their ETAs;
+Finish `M1_STATUS.md` with a short summary, in plain language:
+- which gates passed, and the commit pushed at each step;
+- the bucket diagnostics: occupancy, and anything odd;
+- the pilot's numbers:
+  - seconds per iteration for each batch size and each CPU setting;
+  - peak memory;
+  - checkpoint size;
+  - the CPU and batch choice;
+- projections for the long run:
+  - hours per pass over all 2,070 turn deals;
+  - the projected exact-check time;
+  - the job settings you'd use for Steps 5 and 6;
 - disk usage;
-- anything surprising.
+- anything surprising, and anything you noticed outside M1.
 
-Push the `m1` branch, which has code only. Then stop. Don't start S1 or any other plan step.
+Make sure no jobs of yours are still running (`squeue -u $USER`). Commit `M1_STATUS.md`, push the `m1` branch (code and `M1_STATUS.md` only, never results), and stop. Don't launch Steps 5–6, and don't start S1 or any other plan step.
 
 ## Reference numbers (laptop, M1 Pro, 8 cores, before the speed fix)
 
