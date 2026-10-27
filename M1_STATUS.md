@@ -1,9 +1,9 @@
 # M1 status
 
-Current step: 2, The M1 run script, rehearsed on the small deck
-Last passed gate: 1, 03:55, commit `2cf050f`
-Running jobs: retention recheck 31994703 (node010, started 04:52, about 4 min), then 31994704 (`--resume`, after 31994703)
-Next action: when 31994704 ends, run `m1_check_retention.py` on `solve-retention`, then judge Gate 2
+Current step: 3, Fit the real-deck buckets
+Last passed gate: 2, 05:02, commit `f27de52` (code), status `1442a1c`+
+Running jobs: (being submitted, see 05:03)
+Next action: submit Step 3's two fits, then judge Gate 3 from fit_checks.json
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
@@ -110,3 +110,12 @@ Job 31994378 on node202 (Xeon Gold 5320, 104 threads), commit `ec589c6` (after t
   - `m1_smoke`, t 5453 (job 31994695 vs `solve/`): **bit-identical**.
   - `m1_smoke_lossless`, t 4683 (job 31994696 vs `solve/`): **bit-identical**.
   - Both twins' health checks PASS (max row-sum error 3.3e-16). The lossless twin's in-process exploitability at t 4683 is 0.0286184, equal to the resumed run's evaluation.
+
+### 05:02, Gate 2: PASS
+Code at `f27de52` (no code changes since the rehearsal), all jobs on node010 (Gold 5218).
+- **Resume is invisible:** uninterrupted twins equal the stopped-and-resumed solves bit for bit: `m1_smoke` at t 5453 (31994695), `m1_smoke_lossless` at t 4683 (31994696). See 04:55.
+- **Evaluation agrees (lossless):** `evaluate` equals the in-process `exact_exploitability` exactly at t 1807 (31994697) and t 4683 (31994698), and falls: 0.0740 → 0.0286.
+- **Values make sense:** 4 evaluations (31994697–31994700) and every in-process check: exploitability ≥ 0 and −BR1 ≤ value ≤ BR0 within 1e-9.
+- **Health checks:** all PASS: 16 in the rehearsal, 2 in the twins, 10 in the retention recheck. No FAIL anywhere.
+- **Retention:** recheck 31994703 (budget stop at t 3001) then 31994704 (`--resume`, to t 5961), both COMPLETED. `m1_check_retention.py results/m1/m1_smoke/solve-retention`: rule keeps [1335, 2708, 4993, 5673, 5961], on disk the same, every one of the 5 deletions as the rule says, **match: True**. Milestones 0.02/0.04/0.08 h kept t 1335/2708/4993, and the rule held across the resume. This supersedes the unverifiable t 882 deletion in `m1_smoke_lossless/solve` (old logs lacked hours).
+- Disk: `results/m1` 1.6 GB.
