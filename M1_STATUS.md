@@ -3,7 +3,7 @@
 Current step: 2, The M1 run script, rehearsed on the small deck
 Last passed gate: 1, 03:55, commit `2cf050f`
 Running jobs (submitted 04:45, minutes each, node010): uninterrupted twins 31994695 (m1_smoke, to t 5453) and 31994696 (m1_smoke_lossless, to t 4683); evaluations 31994697 (lossless t 1807), 31994698 (lossless t 4683), 31994699 (smoke t 1235), 31994700 (smoke t 5453, after 31994697)
-Next action: when they end, check Gate 2: compare the twins bit for bit, evaluate equal to in-process, values in range, health and retention
+Next action: see M1_HANDOFF.md (handoff written 04:50); judge Gate 2 when the twins and the retention recheck end
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27. Newest entries at the bottom.
