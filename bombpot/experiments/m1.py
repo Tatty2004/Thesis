@@ -6,6 +6,8 @@ bombpot/holdem/M1_CLAUDE.md; the Slurm scripts are scripts/ionic/m1_*.sbatch.
     python -m bombpot.experiments.m1 check-fit --config C      the checks alone (Gate 3)
     python -m bombpot.experiments.m1 solve --config C [--resume] [--tag T] [overrides]
     python -m bombpot.experiments.m1 evaluate --checkpoint P [--max-minutes M]
+    python -m bombpot.experiments.m1 evaluate --checkpoint P --shards N --shard I   one shard of a split check
+    python -m bombpot.experiments.m1 combine --checkpoint P --shards N   a split check's result, as evaluate's
     python -m bombpot.experiments.m1 check --checkpoint P      does it load, and is it healthy?
     python -m bombpot.experiments.m1 compare A B               are two checkpoints bit-identical?
 
@@ -16,7 +18,8 @@ A config's run folder is results/m1/<config name>/:
   solve[-<tag>]/                      one solve: solve.log, runs.jsonl and its checkpoints:
     ckpt_t<t>.npz                       SampledRangeCFR.save
     ckpt_t<t>.json                      what the solve knew then: health check, timings, flop strategy
-    ckpt_t<t>.eval.json                 the exact check of its average strategy (evaluate)
+    ckpt_t<t>.eval.json                 the exact check of its average strategy (evaluate, or combine)
+    ckpt_t<t>.eval-shards/              a split check's shards (shard<i>of<n>.npz and .log), for combine
 
 The solve runs until a time budget, counted from the start of the process, that must end at
 least 30 minutes before the Slurm job's walltime. It checkpoints every `checkpoint_hours` and
@@ -41,7 +44,8 @@ import numpy as np
 import yaml
 
 from bombpot.core.abstraction.river import EquityBuckets, fit_equity_buckets
-from bombpot.core.solvers.sampled_cfr import Lossless, SampledRangeCFR, exact_exploitability
+from bombpot.core.solvers.sampled_cfr import (Lossless, SampledRangeCFR, exact_exploitability, finish_exploitability,
+                                             last_street_sums, split_chunks, zero_sums)
 from bombpot.experiments.run import RESULTS, git_info
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
@@ -533,6 +537,12 @@ class Progress:
 
 
 def cmd_evaluate(args) -> int:
+    if args.shards is not None:
+        if args.shard is None or not 0 <= args.shard < args.shards or args.max_minutes is not None:
+            raise SystemExit("--shards N needs --shard 0..N-1, and no --max-minutes")
+        return evaluate_shard(args)
+    if args.shard is not None:
+        raise SystemExit("--shard needs --shards")
     ckpt = Path(args.checkpoint).resolve()
     folder = ckpt.parent
     run_dir = folder.parent
@@ -574,6 +584,111 @@ def cmd_evaluate(args) -> int:
     write_json(folder / f"{ckpt.stem}.eval.json", out)
     log(f"exploitability {result['exploitability']!r}, BR0 {result['br_value_p0']!r}, BR1 {result['br_value_p1']!r}, "
         f"value {result['game_value']!r}, {out['seconds'] / 3600:.3f} h, peak {out['peak_gb']:.2f} GB")
+    return 0
+
+
+# Split exact checks: each shard streams its share of the chunks (split_chunks) and saves its
+# river sums in ckpt_t<t>.eval-shards/ (a subfolder, so checkpoints() never lists them); combine
+# adds them up and finishes, equal bit for bit to one evaluate with the same chunk size.
+
+
+def shard_folder(ckpt: Path) -> Path:
+    return ckpt.parent / f"{ckpt.stem}.eval-shards"
+
+
+def load_average(ckpt: Path):
+    """A checkpoint's config, trees and abstraction, its t and solve seconds, and its average
+    strategy."""
+    run_dir = ckpt.parent.parent
+    cfg = yaml.safe_load((run_dir / "config.yaml").read_text())
+    game, pt, river, abstraction = build(cfg, run_dir)
+    solver = make_solver(cfg, pt, river, abstraction)
+    solver.load(ckpt)
+    return cfg, pt, river, abstraction, solver.t, solver.solve_seconds, solver.average_strategy()
+
+
+def evaluate_shard(args) -> int:
+    ckpt = Path(args.checkpoint).resolve()
+    i, n = args.shard, args.shards
+    out_dir = shard_folder(ckpt)
+    out_dir.mkdir(exist_ok=True)
+    log = Log(out_dir / f"shard{i}of{n}.log")
+    git, env = git_info(), environment()
+    start = time.perf_counter()
+    cfg, pt, river, abstraction, t, solve_seconds, avg = load_average(ckpt)
+    chunk = args.chunk or {**RUN_DEFAULTS, **cfg.get("run", {})}["eval_chunk"]
+    D1, C = pt.streets[-1].num_deals, river.num_children
+    ranges = split_chunks(D1, C, chunk, n)
+    chunks = ranges[i]
+    lo, hi = chunks.start * chunk // C, -(-min(D1 * C, chunks.stop * chunk) // C)  # its turn deals
+    setup = time.perf_counter() - start
+    log(f"evaluate {ckpt.name} (t {t}, {solve_seconds / 3600:.3f} h of solving), shard {i} of {n}: chunks "
+        f"{chunks.start}..{chunks.stop - 1} of {ranges[-1].stop} (turn deals {lo}..{hi - 1}) of {chunk} river deals, "
+        f"git {git['git_hash'][:10]}{' dirty' if git['git_dirty'] else ''}, {env['host']} ({env['cpu_model']}), "
+        f"{env['slurm_cpus']} CPUs, {env['numba_threads']} threads; setup {setup:.0f} s, peak {peak_gb():.2f} GB")
+    progress = Progress(log)
+    sums = last_street_sums(pt, river, abstraction, avg, chunk, chunks=chunks, progress=progress)
+    if any(s[:lo].any() or s[hi:].any() for s in sums):
+        raise SystemExit(f"shard {i}'s sums reach outside its turn deals {lo}..{hi - 1}")
+    meta = {"checkpoint": ckpt.name, "t": t, "solve_seconds": solve_seconds, "chunk": chunk, "shard": i, "shards": n,
+            "chunks": [chunks.start, chunks.stop], "parents": [lo, hi], "seconds": time.perf_counter() - progress.start,
+            "setup_seconds": setup, **git, **env, "peak_gb": peak_gb(), "finished": now()}
+    path = out_dir / f"shard{i}of{n}.npz"
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        np.savez(f, meta=np.array(json.dumps(meta, default=str)), **{f"sums{j}": s[lo:hi] for j, s in enumerate(sums)})
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    log(f"shard {i} of {n} done: {meta['seconds'] / 3600:.3f} h, peak {meta['peak_gb']:.2f} GB, saved {path.name}")
+    return 0
+
+
+def cmd_combine(args) -> int:
+    """A split exact check's result: the shards' river sums added up, then the streets above.
+    Writes ckpt_t<t>.eval.json as evaluate does, with `seconds` the shards' streaming time
+    added up and each shard's record in `shard_runs`. Refuses to replace an eval.json unless
+    --force."""
+    ckpt = Path(args.checkpoint).resolve()
+    folder, n = ckpt.parent, args.shards
+    out_path = folder / f"{ckpt.stem}.eval.json"
+    if out_path.exists() and not args.force:
+        raise SystemExit(f"{out_path} exists (--force replaces it)")
+    metas, parts = [], []
+    for i in range(n):
+        with np.load(shard_folder(ckpt) / f"shard{i}of{n}.npz") as z:
+            metas.append(json.loads(str(z["meta"])))
+            parts.append([z[f"sums{j}"] for j in range(len(z.files) - 1)])
+    log = Log(folder / f"{ckpt.stem}.eval.log")
+    git, env = git_info(), environment()
+    start = time.perf_counter()
+    cfg, pt, river, abstraction, t, solve_seconds, avg = load_average(ckpt)
+    D1, C, chunk = pt.streets[-1].num_deals, river.num_children, metas[0]["chunk"]
+    want = [[r.start, r.stop] for r in split_chunks(D1, C, chunk, n)]
+    for i, m in enumerate(metas):
+        if ((m["checkpoint"], m["t"], m["solve_seconds"], m["chunk"], m["shard"], m["shards"], m["chunks"], m["git_hash"])
+                != (ckpt.name, t, solve_seconds, chunk, i, n, want[i], metas[0]["git_hash"])):
+            raise SystemExit(f"shard {i} isn't part of a {n}-shard check of {ckpt.name} with chunk {chunk} and git "
+                             f"{metas[0]['git_hash'][:10]}: {m}")
+    if [m["parents"][0] for m in metas] + [D1] != [0] + [m["parents"][1] for m in metas]:
+        raise SystemExit(f"the shards' turn deals don't tile 0..{D1 - 1}: {[m['parents'] for m in metas]}")
+    sums = zero_sums(pt)
+    for m, part in zip(metas, parts):
+        lo, hi = m["parents"]
+        for s, x in zip(sums, part, strict=True):
+            if x.shape != s[lo:hi].shape:
+                raise SystemExit(f"shard {m['shard']}'s sums are {x.shape}, not {s[lo:hi].shape}")
+            s[lo:hi] += x
+    result = finish_exploitability(pt, avg, sums)
+    out = {**result, "seconds": sum(m["seconds"] for m in metas), "checkpoint": ckpt.name, "t": t,
+           "solve_seconds": solve_seconds, "chunk": chunk, "river_deals": D1 * C, "git_hash": metas[0]["git_hash"],
+           "git_dirty": any(m["git_dirty"] for m in metas), "shards": n, "shard_runs": metas,
+           "combine": {**git, **env, "seconds": time.perf_counter() - start, "peak_gb": peak_gb()}, "finished": now()}
+    write_json(out_path, out)
+    log(f"exploitability {result['exploitability']!r}, BR0 {result['br_value_p0']!r}, BR1 {result['br_value_p1']!r}, "
+        f"value {result['game_value']!r}, from {n} shards ({out['seconds'] / 3600:.3f} h in all, the longest "
+        f"{max(m['seconds'] for m in metas) / 3600:.3f} h), git {out['git_hash'][:10]}"
+        f"{' dirty' if out['git_dirty'] else ''}")
     return 0
 
 
@@ -635,6 +750,12 @@ def main(argv=None) -> int:
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--chunk", type=int, help="river deals per chunk (default: the config's run.eval_chunk)")
     p.add_argument("--max-minutes", type=float, help="stop after this long and record the projected time")
+    p.add_argument("--shards", type=int, help="split the check into this many shards (then run combine)")
+    p.add_argument("--shard", type=int, help="with --shards: which shard to run, 0 to N-1")
+    p = sub.add_parser("combine")
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--shards", type=int, required=True)
+    p.add_argument("--force", action="store_true", help="replace an existing eval.json")
     p = sub.add_parser("check")
     p.add_argument("--checkpoint", required=True)
     p = sub.add_parser("compare")
@@ -642,7 +763,7 @@ def main(argv=None) -> int:
     p.add_argument("b")
     args = ap.parse_args(argv)
     commands = {"fit": lambda a: cmd_fit(a) or cmd_check_fit(a), "check-fit": cmd_check_fit, "solve": cmd_solve,
-                "evaluate": cmd_evaluate, "check": cmd_check, "compare": cmd_compare}
+                "evaluate": cmd_evaluate, "combine": cmd_combine, "check": cmd_check, "compare": cmd_compare}
     return commands[args.command](args)
 
 

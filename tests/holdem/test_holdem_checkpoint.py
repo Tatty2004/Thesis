@@ -9,13 +9,16 @@ with the lossless river and with fitted kmeans_2d buckets:
   - the exact evaluation of a loaded solver's average strategy equals the in-memory one's;
   - saved and loaded buckets give the same ids;
   - loading refuses a checkpoint of another shape and changes nothing;
-  - the evaluation's progress callback reports every chunk count and changes no result.
+  - the evaluation's progress callback reports every chunk count and changes no result;
+  - an evaluation split into shards on turn-deal boundaries adds up to the unsplit one
+    exactly, and the split refuses shards that can't start on such a boundary.
 """
 import numpy as np
 import pytest
 
 from bombpot.core.abstraction.river import EquityBuckets, fit_equity_buckets
-from bombpot.core.solvers.sampled_cfr import Lossless, SampledRangeCFR, exact_exploitability
+from bombpot.core.solvers.sampled_cfr import (Lossless, SampledRangeCFR, exact_exploitability, finish_exploitability,
+                                             last_street_sums, split_chunks, zero_sums)
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
 
@@ -141,3 +144,35 @@ def test_evaluation_progress(setup):
     assert got == exact_exploitability(upper, river, abstractions["lossless"], sigma, chunk=500)
     n = -(-upper.streets[-1].num_deals * river.num_children // 500)
     assert calls == [(d, n) for d in range(2, n, 2)] + [(n, n)]
+
+
+@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("shards", [2, 5])
+def test_split_evaluation_adds_up_exactly(setup, name, shards):
+    # Chunks of 28 river deals: a turn deal (42 rivers) spans parts of two or three chunks, and
+    # every third chunk starts a new turn deal.
+    upper, river, abstractions = setup
+    sigma = run(make(setup, name), 4).average_strategy()
+    D1, n = upper.streets[-1].num_deals, river.num_children
+    ranges = split_chunks(D1, n, 28, shards)
+    assert len(ranges) == shards and ranges[0].start == 0 and ranges[-1].stop == D1 * n // 28
+    assert all(a.stop == b.start for a, b in zip(ranges, ranges[1:]))
+    sums = zero_sums(upper)
+    for r in ranges:
+        assert r.start * 28 % n == 0
+        lo, hi = r.start * 28 // n, r.stop * 28 // n
+        part = last_street_sums(upper, river, abstractions[name], sigma, chunk=28, chunks=r)
+        for s, x in zip(sums, part):
+            assert not x[:lo].any() and not x[hi:].any()
+            s[lo:hi] += x[lo:hi]
+    assert finish_exploitability(upper, sigma, sums) == exact_exploitability(upper, river, abstractions[name], sigma,
+                                                                              chunk=28)  # exactly
+
+
+def test_split_chunks():
+    ranges = split_chunks(2070, 1892, 256, 8)  # M1's real deck: 2,070 turn deals x 1,892 rivers
+    assert [len(r) for r in ranges] == [1892] * 7 + [2055]
+    assert all(r.start * 256 % 1892 == 0 for r in ranges)
+    assert split_chunks(72, 42, 28, 1) == [range(0, 108)]
+    with pytest.raises(ValueError, match="can't be split"):
+        split_chunks(72, 42, 256, 2)  # 12 chunks, and only the first starts a turn deal

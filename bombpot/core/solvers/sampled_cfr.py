@@ -21,6 +21,7 @@ and Sandholm 2019), which needs no discounting of the infosets a sample skips.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -278,6 +279,12 @@ class SampledRangeCFR(IterativeSolver):
 
 
 # Exact evaluation, streaming the last street ------------------------------------------------
+# The last street's values are summed into the closing lines of the street before, per deal of
+# that street (last_street_sums), then the streets above are walked bottom-up
+# (finish_exploitability). The streaming can be split into shards (split_chunks) whose sums add
+# up to the unsplit ones bit for bit, so long evaluations can run as parallel jobs.
+
+_JOBS = ((0, "br"), (1, "br"), (0, "cfr"))  # player 0's and player 1's best responses, then the value
 
 
 def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 256, progress=None,
@@ -286,19 +293,50 @@ def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 
     deal included, streamed `chunk` deals at a time so memory stays bounded. If given,
     progress(chunks done, total chunks) is called every `progress_every` chunks and after
     the last, so long evaluations can log an ETA."""
+    sums = last_street_sums(pt, last, abstraction, sigma, chunk, progress=progress, progress_every=progress_every)
+    return finish_exploitability(pt, sigma, sums)
+
+
+def split_chunks(num_parents: int, num_children: int, chunk: int, shards: int) -> list:
+    """The chunks of an exact evaluation (`chunk` last-street deals each, in order) split
+    into `shards` ranges of about equal size. Every range starts at a chunk that begins a
+    new deal of the street before, so no deal's sums are split between shards, and the
+    shards' sums add up to the unsplit ones bit for bit."""
+    num_chunks = -(-num_parents * num_children // chunk)
+    step = math.lcm(chunk, num_children) // chunk  # chunks from one such start to the next
+    edges = [min(num_chunks, round(i * num_chunks / (shards * step)) * step) for i in range(shards)]
+    ranges = [range(a, b) for a, b in zip(edges, edges[1:] + [num_chunks])]
+    if shards < 1 or any(len(r) == 0 for r in ranges):
+        raise ValueError(f"{num_chunks} chunks of {chunk} can't be split into {shards} shards that each start "
+                         f"with a new deal of the street before (one every {step} chunks)")
+    return ranges
+
+
+def zero_sums(pt: PublicTree) -> list:
+    """Empty last-street sums, one per job, each (D1, L, closes, H)."""
+    T = len(pt.templates)
+    shape = pt.shape(T - 2) + (pt.templates[T - 2].num_closes,)
+    return [np.moveaxis(np.zeros(shape), 3, 2) for _ in _JOBS]
+
+
+def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256, chunks=None, progress=None,
+                     progress_every: int = 1) -> list:
+    """The streamed part of exact_exploitability: for each job, the last street's values
+    summed into the closing lines of the street before, per deal of that street (as in
+    zero_sums). `chunks`, a range of chunk numbers (default every chunk), streams only
+    those: one shard of a split evaluation."""
     T = len(pt.templates)
     D1 = pt.streets[-1].num_deals
     hsig_upper = [list(row) for row in sigma[:T - 1]]
     reach = forward(pt, hsig_upper)
     _, closing = street_reach(pt.templates[T - 2], hsig_upper[T - 2], reach[T - 2][0])
     tp_last = pt.templates[T - 1]
-    jobs = [(0, "br"), (1, "br"), (0, "cfr")]
-    agg = [np.zeros(pt.shape(T - 2) + (pt.templates[T - 2].num_closes,)) for _ in jobs]
-    agg = [np.moveaxis(a, 3, 2) for a in agg]  # (D1, L, closes, H)
+    agg = zero_sums(pt)
     total = D1 * last.num_children
-    num_chunks = -(-total // chunk)
-    for done, lo in enumerate(range(0, total, chunk), 1):
-        flat = np.arange(lo, min(total, lo + chunk))
+    if chunks is None:
+        chunks = range(-(-total // chunk))
+    for done, c in enumerate(chunks, 1):
+        flat = np.arange(c * chunk, min(total, (c + 1) * chunk))
         parents, children = np.divmod(flat, last.num_children)
         st = last.street(parents, children)
         root = next_root(closing, st.parent)
@@ -306,14 +344,23 @@ def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 
         ids = [np.asarray(abstraction.ids(st, parents, children, p)) for p in (0, 1)]
         hsig = [s[rows[:, None], :, ids[q]].transpose(0, 2, 1, 3) for s, q in zip(sigma[T - 1], tp_last.players)]
         nodes, _ = street_reach(tp_last, hsig, root)
-        for j, (p, mode) in enumerate(jobs):
+        for j, (p, mode) in enumerate(_JOBS):
             V, _ = street_values(tp_last, st, pt.contrib[T - 1], hsig, nodes, p, mode, True)
             agg[j] += close_values(V[0], st.parent, D1, pt.templates[T - 2].num_closes)
-        if progress is not None and (done % progress_every == 0 or done == num_chunks):
-            progress(done, num_chunks)
+        if progress is not None and (done % progress_every == 0 or done == len(chunks)):
+            progress(done, len(chunks))
+    return agg
+
+
+def finish_exploitability(pt: PublicTree, sigma, sums) -> dict:
+    """exact_exploitability's result from the last street's sums (last_street_sums, or the
+    shards' sums added into zero_sums): the streets above, bottom-up."""
+    T = len(pt.templates)
+    hsig_upper = [list(row) for row in sigma[:T - 1]]
+    reach = forward(pt, hsig_upper)
     out = []
-    for j, (p, mode) in enumerate(jobs):
-        a = agg[j]
+    for j, (p, mode) in enumerate(_JOBS):
+        a = sums[j]
         for t in range(T - 2, -1, -1):
             V, _ = street_values(pt.templates[t], pt.streets[t], pt.contrib[t], hsig_upper[t], reach[t], p, mode,
                                  False, a)

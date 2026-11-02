@@ -4,7 +4,10 @@
     generator state recorded before it (Gate 3's determinism check).
   - Retention keeps the newest 2 checkpoints and the first at or after each milestone.
   - The real-deck configs hold M1's fixed choices.
+  - An exact check split into shards and combined (evaluate --shards, then combine) writes
+    the same result as one evaluate, and retention never takes a shard for a checkpoint.
 """
+import json
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +15,8 @@ import pytest
 import yaml
 
 from bombpot.core.abstraction.river import fit_equity_buckets
-from bombpot.experiments.m1 import fit_by_parent, keep_set, make_game, refit_one, same_bits
+from bombpot.experiments.m1 import (build, checkpoints, fit_by_parent, keep_set, main, make_game, make_solver,
+                                   refit_one, same_bits)
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
 
@@ -50,3 +54,35 @@ def test_real_deck_configs_hold_the_fixed_choices(name, method):
     assert cfg["buckets"] == {"method": method, "k": 200, "samples": 50, "seed": 0, "restarts": 3}
     assert cfg["solver"]["seed"] == 0 and cfg["solver"]["samples"] == 4 and cfg["solver"]["batch"] in (64, 256)
     assert not cfg["run"].get("eval_in_process", False)  # never the exact check inside a real-deck solve
+
+
+def test_split_check_equals_one_check(tmp_path):
+    cfg = yaml.safe_load((CONFIGS / "m1_smoke.yaml").read_text())
+    run_dir = tmp_path / "m1_smoke"
+    (run_dir / "solve").mkdir(parents=True)
+    (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg))
+    game = make_game(cfg)
+    upper = holdem_public_tree(game, upto=2)
+    river = HoldemRiver(game, upper)
+    b = cfg["buckets"]
+    fit_equity_buckets(river, upper.streets[-1].num_deals, b["method"], b["k"], samples=b["samples"], seed=b["seed"],
+                       restarts=b["restarts"]).save(run_dir / "buckets.npz")
+    _, pt, river, abstraction = build(cfg, run_dir)
+    solver = make_solver(cfg, pt, river, abstraction)
+    for _ in range(5):
+        solver.iteration()
+    ckpt = run_dir / "solve" / "ckpt_t000000005.npz"
+    solver.save(ckpt)
+    out = run_dir / "solve" / "ckpt_t000000005.eval.json"
+    assert main(["evaluate", "--checkpoint", str(ckpt), "--chunk", "28"]) == 0
+    whole = json.loads(out.read_text())
+    for i in range(3):
+        assert main(["evaluate", "--checkpoint", str(ckpt), "--chunk", "28", "--shards", "3", "--shard", str(i)]) == 0
+    with pytest.raises(SystemExit, match="exists"):
+        main(["combine", "--checkpoint", str(ckpt), "--shards", "3"])
+    assert main(["combine", "--checkpoint", str(ckpt), "--shards", "3", "--force"]) == 0
+    split = json.loads(out.read_text())
+    for key in ("exploitability", "br_value_p0", "br_value_p1", "game_value", "t", "chunk", "river_deals"):
+        assert split[key] == whole[key], key  # exactly
+    assert [r["shard"] for r in split["shard_runs"]] == [0, 1, 2]
+    assert checkpoints(run_dir / "solve") == [(5, ckpt)]
