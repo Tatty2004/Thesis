@@ -1,12 +1,12 @@
 # M1 status
 
-Current step: 6, Exact checks of the 2 h checkpoints (authorized by the user 10:27)
-Last passed gate: 5 (both methods), 10:20; avg_1d's speed check accepted by the user at 10:24, commit `dac4d85`
-Running jobs: long solve 31994844 (m1_kmeans2d, node202) and 31994845 (m1_avg1d, node204), started 08:12, budget ends 2026-10-30 07:36; exact checks 31995076 (kmeans_2d t 1008, node203) and 31995077 (avg_1d t 1564, node206), started 10:28; projected ends: avg_1d about 20:50 today (2.44 s per chunk, 10.4 h), kmeans_2d about 2026-10-28 08:45 (5.24 s per chunk, 22.3 h) (walltime 1-08:15)
-Next action: Gate 6 when each exact check finishes (avg_1d about 20:50 today, kmeans_2d about 2026-10-28 08:45); push `m1`
+Current step: 6, Exact checks of the final checkpoints (the user asked 2026-11-02 17:40 EST, to finish by 2026-11-03 15:00)
+Last passed gate: 6 for the 2 h checkpoints (both methods), recorded 2026-11-02; split check committed at `5e8c385`
+Running jobs (2026-11-02 EST): 32075065 avg_1d final t 54174, unsplit (node206, from 17:42, about 11.6 h, so about 05:20); 32075144 split re-check of avg_1d t 1564, 8 shards (node202/204, from 18:01, about 2 h), then 32075145 combine; 32075146 kmeans_2d final t 35108, 8 shards (starts when 32075144 ends, about 4 h), then 32075147 combine; tests 32075191 (full suite) and 32075192 (river, --runslow)
+Next action: when 32075145 ends, its result must equal keep/ckpt_t000001564.eval.json exactly; then Gate 6 for both final checks; push `m1`
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
-Times are EDT, 2026-10-27. Newest entries at the bottom.
+Times are EDT, 2026-10-27, until the entries recorded on 2026-11-02 (EST, dated). Newest entries at the bottom.
 
 **User instruction, 03:28:** "if you do pass anything then feel free to push to step 5 (the long solve)". My reading: if every gate through Gate 4 passes and the pilot is inside rule 7's limits, launch Step 5 (one long solve per method) tonight, and run Gate 5 on their first checkpoints. Step 6 (exact checks) still waits for the user's review. Any failed gate still stops the run.
 
@@ -310,3 +310,35 @@ Code changed after Gate 4: only `budget_hours` 71.5 → 71.4 in the two real-dec
 - Both on Gold 5320 (the pilot's timing type), from clean `96a9fc9`. Walltime 1.5 × the 21.5 h projection; memory 2 × the timing run's 9.7 GB. `eval.json` lands next to each checkpoint in `keep/`.
 - node206 is accepted by `-w` now (Step 3 had node208 and node302 refused).
 - First progress, 10:32: kmeans_2d 5.24 s per chunk (the pilot timing run measured 5.05), projected 22.3 h; avg_1d 2.44 s per chunk, projected 10.4 h (its 1D bucket lookup is cheaper, as in the solve). Both well inside the 32.25 h walltime.
+
+### Gate 6, 2 h checkpoints: PASS (checks ended 2026-10-27 21:15 and 2026-10-28 09:20; recorded 2026-11-02)
+
+| | kmeans_2d, t 1008 (31995076, node203) | avg_1d, t 1564 (31995077, node206) |
+|---|---|---|
+| Exploitability | 0.08719706309402686 | 0.08653180358916157 |
+| BR0 / BR1 | 0.00950636764029178 / 0.16488775854776194 | 0.018885002405194057 / 0.15417860477312909 |
+| Game value | −0.08074783752166148 | −0.07355591262581078 |
+| −BR1 ≤ value ≤ BR0 | yes | yes |
+| `eval.json` | git `96a9fc9`, clean; t 1008 | git `96a9fc9`, clean; t 1564 |
+| Time | 22.87 h (5.38 s per chunk) | 10.79 h (2.54 s per chunk) |
+
+- Both pass every check: exploitability ≥ 0, the value between −BR1 and BR0, and a clean git hash and t in `eval.json`. **Gate 6: PASS for both.**
+- At 2 h the strategies were far from converged (player 0's flop bet frequency later fell from 0.14 to 0.073), so the near-tie between the methods says little yet.
+- Memory: sacct MaxRSS 16.1 GB of the 20 GB asked; the log's "peak" (9.3 GB) undercounts. Later checks ask for 24G.
+
+### Step 5 ended (2026-10-30 07:36; recorded 2026-11-02)
+- Both solves stopped at their budget, COMPLETED with exit 0: kmeans_2d (31994844) at t 35,108 after 70.76 h of solving (7.26 s/it), avg_1d (31994845) at t 54,174 after 70.68 h (4.70 s/it). All 36 health checks of each passed. MaxRSS 15.9 GB of 50.
+- Kept in `solve/` (milestones land one checkpoint late, see 10:20): kmeans_2d t 2005, 3009, 5016, 8984, 16866, 32753, 34705, 35108; avg_1d t 3048, 4601, 7696, 13852, 26289, 50462, 53557, 54174. The 2 h ones are in `keep/`.
+- Player 0's flop bet frequency settled after about 24 h: overall 0.073 (kmeans_2d) and 0.070 (avg_1d). KcKh, AcAd, 7d7h, 9c9d and 5s6s never bet; 3c4d bets 0.375 and 0.405 of the time. 3c4d has a wheel gutshot on board A (the A and 2 are there) and 5s6s only backdoor draws, so the "straight draw" and "little" labels in M1_CLAUDE.md's sanity list are the wrong way round.
+- **CPU use (seff):** 5.1% and 6.8% of the 64 CPUs for the solves, 7.2% and 13.3% for the 2 h checks, 4.6% for the pilot: about 3–8 CPUs busy. The river code's bucket lookup (`EquityBuckets.ids`) and scatter (`np.add.at` in `_scatter`) are plain numpy, on one core.
+- Disk: about 160 GB in `results/m1`. Scratch is 88% full (1.3 TB free, down from 2.3 TB).
+
+### 2026-11-02 17:42 EST, Step 6: final checks (asked by the user, to finish by 2026-11-03 15:00)
+- **avg_1d t 54174, unsplit**, as the 2 h checks ran: 32075065, `sbatch -w node206 --cpus-per-task=32 --time=16:00:00 --mem=24G scripts/ionic/m1_eval.sbatch --checkpoint results/m1/m1_avg1d/solve/ckpt_t000054174.npz` from `314cb86`. At 16 threads it runs 2.72 s per chunk (2.54 at 32), projected 11.6 h.
+- **kmeans_2d unsplit would take about 23 h**, past the deadline, so its check is split into shards (the plan's S3, without the re-solve provider), commit `5e8c385`:
+  - `exact_exploitability` is now `last_street_sums` over every chunk, then `finish_exploitability`. `split_chunks` cuts only where a chunk starts a new turn deal (every 473 chunks of 256 here), so no turn deal's sums are split and the shards add up to the unsplit sums bit for bit.
+  - `m1.py evaluate --shards N --shard I` saves shard I's sums in `ckpt_t<t>.eval-shards/`, a subfolder because retention lists `ckpt_t*.npz` and would choke on shard files named like checkpoints. `m1.py combine` checks the shards belong together and writes `ckpt_t<t>.eval.json`. `m1_eval.sbatch` runs shard `$SLURM_ARRAY_TASK_ID` in an array job; `m1_combine.sbatch` is new.
+  - Tests on spin: `test_holdem_checkpoint.py` and `test_m1.py`, 21 passed, 6 of them new: split equals unsplit exactly (lossless and kmeans_2d, 2 and 5 shards), the real deck's split, and `evaluate --shards` plus `combine` equal one `evaluate` on the smoke deck. On a compute node: 32075191 (full suite) and 32075192 (`test_holdem_river.py --runslow`).
+- **Real-deck check of the split:** avg_1d t 1564 again, 8 shards, in `results/m1/m1_avg1d/split-check/` (a hard link of `keep/`'s checkpoint, so `keep/`'s result is untouched). It must reproduce 0.08653180358916157 exactly. 32075144 (array; 16 CPUs and 24G per shard) then 32075145 (combine).
+- **kmeans_2d t 35108:** 32075146 (8 shards, the same settings, after 32075144's shards end) then 32075147 (combine). About 4 h per shard expected.
+- All on Gold 5320 nodes, like the 2 h checks (`-x` every other node).
