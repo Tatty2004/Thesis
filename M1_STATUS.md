@@ -1,9 +1,9 @@
 # M1 status
 
-Current step: 6, Exact checks of the final checkpoints (the user asked 2026-11-02 17:40 EST, to finish by 2026-11-03 15:00)
-Last passed gate: 6 for the 2 h checkpoints (both methods), recorded 2026-11-02; split check committed at `5e8c385`
-Running jobs (2026-11-03 EST): 32075065 avg_1d final t 54174, unsplit (node206, from 2026-11-02 17:42; 2.77 s per chunk, projected 11.8 h, so about 05:30)
-Next action: Gate 6 for avg_1d's final check when 32075065 ends; push `m1`
+Current step: 6 done, exact checks of the final checkpoints, both ended by 2026-11-03 05:43 (the user asked 2026-11-02 17:40 EST, to finish by 2026-11-03 15:00)
+Last passed gate: 6 for the final checkpoints (both methods), 2026-11-03; split check committed at `5e8c385`
+Running jobs: none
+Next action: push `m1` (needs the user's key); what comes next is the user's call
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27, until the entries recorded on 2026-11-02 (EST, dated). Newest entries at the bottom.
@@ -363,3 +363,20 @@ Code changed after Gate 4: only `budget_hours` 71.5 → 71.4 in the two real-dec
 - From 0.0872 at t 1008 (2 h of solving) to 0.0393 at t 35108 (70.8 h): 2.2× lower.
 - Memory: sacct MaxRSS 9.3–15.9 GiB per shard of the 24G asked; the combine 11.7 GiB.
 - The shards' sums (1.3 GB) stay in `ckpt_t000035108.eval-shards/`, so the combine can be rerun.
+
+### 2026-11-03 05:48 EST, Gate 6, avg_1d final checkpoint: PASS; Step 6 ended
+- 32075065 (node206, unsplit, 32 CPUs, 16 threads, from clean `314cb86`) ended at 05:42: 11.97 h, 2.82 s per chunk. sacct MaxRSS 16.1 GiB of the 24G asked. Passes every check, and (BR0 + BR1)/2 equals the exploitability exactly. **Gate 6: PASS for avg_1d's final checkpoint, so for both final checkpoints.**
+
+| | kmeans_2d | avg_1d |
+|---|---|---|
+| Final checkpoint | t 35108 after 70.76 h of solving | t 54174 after 70.68 h |
+| Exploitability | **0.039255648353813975** | **0.07918339860260723** |
+| BR0 / BR1 | −0.02308687965667766 / 0.10159817636430561 | 0.01628403572676701 / 0.14208276147844745 |
+| Game value | −0.0664896563471537 | −0.06803301647107197 |
+| −BR1 ≤ value ≤ BR0 | yes | yes |
+| `eval.json` | git `341f673`, clean; t 35108; 8 shards | git `314cb86`, clean; t 54174; unsplit |
+| Exploitability at 2 h (Gate 6 above) | 0.08719706309402686 (t 1008) | 0.08653180358916157 (t 1564) |
+| Change from 2 h | −55% | −8.5% |
+
+- At equal solve time, kmeans_2d ends 2.0× less exploitable than avg_1d, with 35% fewer iterations. At 2 h the two were within 1%.
+- One reading: avg_1d is close to the floor its 1-D buckets allow, and kmeans_2d isn't yet. The checkpoints kept in `solve/` (seven per method) could show it as a convergence curve. This is one solve per method with one seed, so run-to-run variation is unknown.
