@@ -2,8 +2,8 @@
 
 Current step: 6, Exact checks of the final checkpoints (the user asked 2026-11-02 17:40 EST, to finish by 2026-11-03 15:00)
 Last passed gate: 6 for the 2 h checkpoints (both methods), recorded 2026-11-02; split check committed at `5e8c385`
-Running jobs (2026-11-02 EST): 32075065 avg_1d final t 54174, unsplit (node206, from 17:42, about 11.6 h, so about 05:20); 32075146 kmeans_2d final t 35108, 8 shards (from 20:10–20:18 on node206/204/202; early projections 3.1–4.2 h each, so about 00:30), then 32075147 combine
-Next action: Gate 6 for both final checks as they end; push `m1`
+Running jobs (2026-11-03 EST): 32075065 avg_1d final t 54174, unsplit (node206, from 2026-11-02 17:42; 2.77 s per chunk, projected 11.8 h, so about 05:30)
+Next action: Gate 6 for avg_1d's final check when 32075065 ends; push `m1`
 Push: **blocked**, so commits on `m1` are local only for now (see 03:20 below)
 
 Times are EDT, 2026-10-27, until the entries recorded on 2026-11-02 (EST, dated). Newest entries at the bottom.
@@ -347,3 +347,19 @@ Code changed after Gate 4: only `budget_hours` 71.5 → 71.4 in the two real-dec
 - 32075144's 8 shards (node204 ×5, node202 ×3, 1 h 47 min to 2 h 09 min each) and 32075145's combine (1 min 44 s, node208), from clean `5e8c385`, give **exactly** `keep/`'s unsplit result for avg_1d t 1564: exploitability 0.08653180358916157, BR0 0.018885002405194057, BR1 0.15417860477312909, game value −0.07355591262581078 (compared with `==`). 2.13 h of wall time instead of 10.79 h.
 - Shards packed 5 to a node ran 3.3–3.7 s per chunk, against 2.54 s for one unsplit check on 32 CPUs.
 - 32075146 (kmeans_2d t 35108): shards 0–4 started at 20:10 (node206 ×4, node204), 5–6 at 20:15 (node204), 7 at 20:18 (node202). All 8 recorded git `341f673`, clean; setup 24–80 s, peak 9.35 GB. First rates 6.0–7.9 s per chunk, projected 3.1–4.2 h per shard (the unsplit 2 h check ran 5.38 s per chunk on 32 CPUs). Committed only after all 8 had started: combine requires one git hash across the shards.
+
+### 2026-11-03 00:08 EST, Gate 6, kmeans_2d final checkpoint: PASS
+
+| | kmeans_2d, t 35108 (32075146, then 32075147) |
+|---|---|
+| Exploitability | 0.039255648353813975 |
+| BR0 / BR1 | −0.02308687965667766 / 0.10159817636430561 |
+| Game value | −0.0664896563471537 |
+| −BR1 ≤ value ≤ BR0 | yes |
+| `eval.json` | git `341f673`, clean; t 35108; 8 shards whose turn deals tile 0..2069 |
+| Time | 3 h 48 min of wall time (20:10 to 23:58). The shards took 3.24–3.77 h each (6.1–7.2 s per chunk), 27.34 h in all; the combine 28 s. |
+
+- Passes every check, and (BR0 + BR1)/2 equals the exploitability exactly. **Gate 6: PASS for kmeans_2d's final checkpoint.**
+- From 0.0872 at t 1008 (2 h of solving) to 0.0393 at t 35108 (70.8 h): 2.2× lower.
+- Memory: sacct MaxRSS 9.3–15.9 GiB per shard of the 24G asked; the combine 11.7 GiB.
+- The shards' sums (1.3 GB) stay in `ckpt_t000035108.eval-shards/`, so the combine can be rerun.
