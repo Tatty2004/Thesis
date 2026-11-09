@@ -9,6 +9,7 @@ The work is built in layers. Each layer is a package under `bombpot/` with its o
 | Core | `bombpot/core/` | Game protocols, limit-betting engine, tree compiler, solvers, best response, bucketing. Game-agnostic. | in use |
 | Toy games | `bombpot/toygames/`, [CLAUDE.md](bombpot/toygames/CLAUDE.md) | Prove the code correct on games small enough to check exactly, and measure what bucketing costs. | done 2026-09-29 |
 | Hold'em | `bombpot/holdem/`, [CLAUDE.md](bombpot/holdem/CLAUDE.md) | Real double-board Hold'em: two hole cards, a 52-card deck, and a range solver that scales. | in progress |
+| Value net | `bombpot/valuenet/`, [PLAN_valuenet.md](bombpot/holdem/PLAN_valuenet.md) | Real no-limit double-board Hold'em: a counterfactual value network at the end of the turn, exact flop+turn solves per flop pair, exact safe river re-solving, exact grading. | in progress (2026-11-09) |
 | PLO | later | The thesis target. | |
 
 `bombpot/experiments/` runs the experiments of every layer.
@@ -17,10 +18,10 @@ The work is built in layers. Each layer is a package under `bombpot/` with its o
 - **`core/` is game-agnostic.** It never imports a layer or names a specific game. It sees games only through the `Game` and `CardGame` protocols and the compiled tree.
 - **Layers build on `core/` only and never import each other.** `experiments/` may use everything. `tests/test_rules.py` enforces both rules.
 - **Follow each layer's build order.** Don't start a step while an earlier step's test fails.
-- **Don't expand scope.** No neural methods, multiway, or performance work beyond what the current step needs. If something seems necessary, stop and ask.
+- **Don't expand scope.** No multiway, and no performance work beyond what the current step needs. Neural methods are allowed only as the value network of PLAN_valuenet.md (decided 2026-11-09). If something else seems necessary, stop and ask.
 
 ## Stack
-Python 3.11+, numpy, scipy (`linprog` with HiGHS), numba (the range solver's sweeps), POT (Earth Mover's Distance), pyyaml, pytest, matplotlib (plots only, in `experiments/`). `open_spiel` only inside `tests/` for cross-checks.
+Python 3.11+, numpy, scipy (`linprog` with HiGHS), numba (the range solver's sweeps), POT (Earth Mover's Distance), pyyaml, pytest, matplotlib (plots only, in `experiments/`). `open_spiel` only inside `tests/` for cross-checks. PyTorch and h5py only in `bombpot/valuenet/` and `experiments/valuenet/`, imported lazily; they live in a separate environment on scratch (`/n/fs/scratch/rb5709/envs/torch/bin/python`), because home has a 5 GB quota.
 
 Use `.venv/bin/python` (3.11, package installed with `pip install -e .`). The system `python3` is 3.9. OpenSpiel's `sequence_form_lp` needs cvxpy, which isn't installed, so tests use its `exploitability`, `expected_game_score` and CFR solvers instead. OpenSpiel's `universal_poker` (the ACPC poker engine) is available and is the outside reference for Hold'em rules.
 
@@ -72,21 +73,27 @@ Symmetric for player 1. Compare values within 1e-6.
 ```
 bombpot/
   core/          game.py (Game and CardGame protocols), limit.py (limit-betting engine, LimitPoker),
+                 betting.py (no-limit / pot-limit engine with pot-fraction sizes, stacks and all-in, PotPoker),
                  tree.py (compile a Game to sequence-form arrays, strategy utilities, saved strategies),
                  public.py (public tree for range solvers: betting templates, deals, fold/share operators),
                  removal.py (card-removal fold/showdown sums in O(hands) per deal, compiled),
                  jit.py (compile kernels in parallel and serial variants, picked by problem size)
     solvers/     cfr.py (CFR, CFR+, DCFR on the tree), range_cfr.py (the same on the public tree, ranges as
-                 vectors), sampled_cfr.py (public chance sampling for a last street too big to enumerate,
-                 with an exact streamed evaluator), lp.py (sequence-form LP, best response as an LP)
+                 vectors; `leaf=` takes turn-end values from a provider), sampled_cfr.py (public chance
+                 sampling for a last street too big to enumerate, with an exact streamed evaluator),
+                 subgame.py (one last-street subgame from root ranges), resolve.py (safe re-solving),
+                 lp.py (sequence-form LP, best response as an LP)
     eval/        best_response.py, exploitability.py, audit.py (dominated actions)
     abstraction/ features.py, bucketing.py, abstract_game.py, river.py (river infosets that forget the
                  river cards: equity buckets per turn deal)
   toygames/      kuhn.py, leduc.py, board_leduc.py, CLAUDE.md
   holdem/        cards.py (any deck size), evaluator.py (best five-card hand, and a compiled bulk version),
                  game.py (Holdem), public.py (the public tree with card-removal streets, up to 52 cards, and
-                 HoldemRiver, river deals on demand), CLAUDE.md
-  experiments/   games.py (every game a config can name, and its public tree), run.py (runner and bookkeeping;
+                 HoldemRiver, river deals on demand), CLAUDE.md, PLAN_full_solver.md, M1_CLAUDE.md,
+                 PLAN_valuenet.md (the current plan)
+  valuenet/      features.py (ranges as equity-bin histograms), model.py (the value network, PyTorch),
+                 leaf.py (NetLeaf: the network as a turn-end value provider)
+  experiments/   valuenet/ (datagen.py, train.py), m1.py (the M1 pipeline), games.py (every game a config can name, and its public tree), run.py (runner and bookkeeping;
                  `solver.backend: range` solves with the range solver),
                  grid.py (bucketing grid, table, plot), certify.py (equilibrium certification),
                  configs/<layer>/*.yaml

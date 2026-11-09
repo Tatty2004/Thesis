@@ -142,6 +142,9 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
 
 ## Next phase
 
+**Current (2026-11-09): [PLAN_valuenet.md](PLAN_valuenet.md)**, the value-network solver for the real no-limit game (ante 1, 100 behind, 1/2-pot and pot sizes). M1 (below) ran to completion and is the limit baseline: exploitability 0.0393 (kmeans_2d) and 0.0792 (avg_1d) after 71 h, see M1_STATUS.md.
+
+**Previous:** 
 The full solver ("option c", agreed 2026-10-06) is planned step by step in [PLAN_full_solver.md](PLAN_full_solver.md):
 - a safe river re-solver;
 - more river groupings;
