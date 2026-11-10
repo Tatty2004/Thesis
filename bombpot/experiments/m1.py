@@ -342,7 +342,7 @@ def health_check(solver: SampledRangeCFR, avg: list, previous_t: int) -> dict:
 def flop_report(game: Holdem, pt, avg: list, hands) -> dict:
     """Player 0's average strategy at the flop's first decision: the bet frequency of each
     listed hand, and over all hands (all equally likely there)."""
-    tp = pt.templates[0]
+    tp = pt.classes[0][0].template
     if tp.players[0] != 0 or tuple(tp.actions[0]) != ("c", "r"):
         raise ValueError(f"the flop's first node isn't player 0's check or bet: {tp.players[0]} {tp.actions[0]}")
     bet = avg[0][0][0, 0, :, 1]

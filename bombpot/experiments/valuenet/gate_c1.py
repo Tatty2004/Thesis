@@ -1,7 +1,8 @@
 """Gate C1 (PLAN_valuenet.md, section C): a flop+turn DCFR solve with exact river leaves
 (ExactRiverLeaf), graded exactly with every river re-solved (unsafe: solve_subgames from the
 blueprint's closing ranges at the turn), against a full-width lossless DCFR solve of the same
-three-street game at equal iteration counts. Small deck only (5 ranks x 3 suits).
+three-street game at equal iteration counts. Small deck only (5 ranks x 3 suits); the limit game,
+or (--game pot) the no-limit game with short stacks (several line classes, all-in lines).
 
     python -m bombpot.experiments.valuenet.gate_c1 --iters 200 --checks 10,25,50,100,200 \
         --leaf-tol 1e-3 --resolve-tol 1e-3 --out results/valuenet/subgame/gate_c1.json
@@ -16,25 +17,30 @@ from pathlib import Path
 import numpy as np
 
 from bombpot.core.solvers.range_cfr import RangeCFR, forward
-from bombpot.core.solvers.subgame import ExactRiverLeaf, solve_subgames
+from bombpot.core.solvers.subgame import ExactRiverLeaf
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
 
-GAME = Holdem(num_ranks=5, num_suits=3, board_cards=(3, 1, 1), flops=("2c3c4d", "5c6d4c"), bet_sizes=(2, 4, 4))
+FLOPS = ("2c3c4d", "5c6d4c")
 
 
-def grade(full, upper, leaf, upper_sigma, tol, iters, variant="cfr+"):
+def make_game(name: str, stack: float = 20.0):
+    if name == "limit":
+        return Holdem(num_ranks=5, num_suits=3, board_cards=(3, 1, 1), flops=FLOPS, bet_sizes=(2, 4, 4))
+    return Holdem(num_ranks=5, num_suits=3, board_cards=(3, 1, 1), flops=FLOPS, betting="pot", stack=stack,
+                  sizes=(0.5, 1), max_aggressive=2)
+
+
+def grade(full, upper, river, upper_sigma, tol, iters, variant="cfr+", check_every=10):
     """Exact exploitability of the flop+turn strategy with every river re-solved from its
     closing ranges (unsafe re-solve), on the full three-street tree."""
+    resolver = ExactRiverLeaf(upper, river, tol, variant=variant, iters=iters, check_every=check_every)
     _, closing = forward(upper, upper_sigma, closing=True)
-    D, L, C, H = closing[0].shape
-    sub = solve_subgames(leaf.street, full.templates[2], full.contrib[2], closing[0].reshape(D, L * C, H),
-                         closing[1].reshape(D, L * C, H), leaf.group, variant, iters, tol,
-                         criterion="total")
-    sigma = [list(upper_sigma[0]), list(upper_sigma[1]), list(sub.strategy)]
+    sigma = [upper_sigma[0], upper_sigma[1], resolver.strategy(closing)]
     out = RangeCFR(full).exploitability(sigma)
-    out.update(resolve_iterations=sub.iterations, resolve_max_exploitability=float(sub.exploitability.max()),
-               resolve_total_raw=float(sub.exploitability_raw.sum()), resolve_seconds=sub.seconds)
+    st = resolver.stats[-1]
+    out.update(resolve_iterations=st["iterations"], resolve_max_exploitability=st["max_exploitability"],
+               resolve_total_raw=st["total_exploitability_raw"], resolve_seconds=st["seconds"])
     return out
 
 
@@ -48,12 +54,15 @@ def main(argv=None):
     ap.add_argument("--inner", default="cfr+", choices=["cfr+", "dcfr"], help="subgame solver variant")
     ap.add_argument("--check-every", type=int, default=10, help="subgame tolerance checks")
     ap.add_argument("--part", default="both", choices=["both", "lossless", "leaf"])
+    ap.add_argument("--game", default="limit", choices=["limit", "pot"])
+    ap.add_argument("--stack", type=float, default=20.0, help="chips behind (pot game)")
     ap.add_argument("--out", default="results/valuenet/subgame/gate_c1.json")
     a = ap.parse_args(argv)
     checks = sorted({int(x) for x in a.checks.split(",")} | {a.iters})
-    full = holdem_public_tree(GAME)
-    upper = holdem_public_tree(GAME, upto=2)
-    river = HoldemRiver(GAME, upper)
+    game = make_game(a.game, a.stack)
+    full = holdem_public_tree(game)
+    upper = holdem_public_tree(game, upto=2)
+    river = HoldemRiver(game, upper)
     result = {"args": vars(a), "lossless": {}, "leaf": {}}
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -73,8 +82,7 @@ def main(argv=None):
 
     if a.part == "lossless":
         return
-    leaf = ExactRiverLeaf(upper, river, full.templates[2], full.contrib[2], a.leaf_tol, a.inner, a.sub_iters,
-                          a.check_every)
+    leaf = ExactRiverLeaf(upper, river, a.leaf_tol, variant=a.inner, iters=a.sub_iters, check_every=a.check_every)
     solver = RangeCFR(upper, "dcfr", leaf=leaf)
     while solver.t < a.iters:
         solver.iteration()
@@ -82,7 +90,7 @@ def main(argv=None):
             t0 = time.perf_counter()
             flop_turn = solver.exploitability()  # br against the leaf values
             avg = solver.hand_sigma(solver.average_strategy())
-            exact = grade(full, upper, leaf, avg, a.resolve_tol, a.sub_iters, a.inner)
+            exact = grade(full, upper, river, avg, a.resolve_tol, a.sub_iters, a.inner, a.check_every)
             its = [s["iterations"] for s in leaf.stats]
             result["leaf"][solver.t] = {
                 "wall_time": solver.solve_seconds, "flop_turn": flop_turn, "exact": exact,

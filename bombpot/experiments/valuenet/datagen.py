@@ -2,15 +2,22 @@
 subgames solved exactly by core/solvers/subgame.py, one HDF5 shard per job.
 
 A sample: a random flop pair (two disjoint 3-card flops), random turn cards (one per board),
-a random pot (log-uniform on [2, 200], stacks 101 - pot / 2 each), and random ranges for both
+the river's betting (below), and random ranges for both
 players over the hands possible at that turn deal (DeepStack's recursive random splitting,
 plus some near-uniform and some very peaked ranges), normalized to sum 1. The river subgame of
 that turn deal is solved from those ranges to `tol` pots with chance weights of the river
 alone (each valid river deal of a hand pair weighs 1 / (rest x (rest - 1))), so its values are
 "values given normalized ranges". The format is in experiments/valuenet/README.md.
 
-The no-limit engine isn't merged yet, so the river betting is the limit template
-(`--template limit`, bets of 4 chips), with the sampled pot only setting the chips already in.
+River betting:
+- `--template pot` (the real game: no-limit, 1/2-pot and pot sizes, 2 aggressive actions per
+  street, 100 behind after an ante of 1): a river line drawn uniformly from the real game's
+  river lines that still have betting (pt.classes[2]), its pot P_l = 2 x contrib, then
+  P = P_l x exp(U(-ln s, ln s)) (s = `--spread`, default 2; 1 keeps the real pots), capped so
+  each player keeps more than 0 behind. The river template for that pot and stack is walked
+  from the engine (core.public._walk on a river state with both contributions set to P/2).
+- `--template limit` (the limit baseline): pot log-uniform on [2, 200], stacks 101 - P/2,
+  the limit river (bets of 4 chips), the pot only setting the chips already in.
 
     python -m bombpot.experiments.valuenet.datagen --n 100 --seed 0 --out results/valuenet/subgame/shard_0.h5
 """
@@ -23,7 +30,10 @@ from pathlib import Path
 
 import numpy as np
 
-from bombpot.core.solvers.subgame import solve_subgame
+from bombpot.core.game import CHANCE
+from bombpot.core.limit import CALL
+from bombpot.core.public import Template, _class_template, _walk
+from bombpot.core.solvers.subgame import line_template, solve_subgame
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
 
@@ -88,23 +98,73 @@ def random_range(rng, valid: np.ndarray, strength: np.ndarray) -> np.ndarray:
 
 
 def sample_spot(rng, num_ranks: int, num_suits: int) -> dict:
-    """Random flop pair, turn cards and pot."""
+    """Random flop pair and turn cards."""
     cards = rng.permutation(num_ranks * num_suits)
     flops = (tuple(sorted(int(c) for c in cards[:3])), tuple(sorted(int(c) for c in cards[3:6])))
-    pot = float(np.exp(rng.uniform(np.log(POT_RANGE[0]), np.log(POT_RANGE[1]))))
-    return {"flops": flops, "turn": (int(cards[6]), int(cards[7])), "pot": pot, "stack": STACK - pot / 2}
+    return {"flops": flops, "turn": (int(cards[6]), int(cards[7]))}
+
+
+def make_game(flops, num_ranks: int, num_suits: int, template: str) -> Holdem:
+    if template == "limit":
+        return Holdem(num_ranks=num_ranks, num_suits=num_suits, board_cards=(3, 1, 1), flops=flops, bet_sizes=(2, 4, 4))
+    if template == "pot":  # the real game (PLAN_valuenet.md)
+        return Holdem(num_ranks=num_ranks, num_suits=num_suits, board_cards=(3, 1, 1), flops=flops, betting="pot",
+                      stack=STACK - 1.0, sizes=(0.5, 1.0), max_aggressive=2)
+    raise ValueError(f"unknown template {template!r}")
+
+
+def river_start(game):
+    """A state where the river's betting begins (the flop and turn checked down)."""
+    s = game.initial_state()
+    while True:
+        if game.current_player(s) == CHANCE:
+            s = game.next_state(s, game.chance_outcomes(s)[0][0])
+        elif game.street(s) == 2:
+            return s
+        else:
+            s = game.next_state(s, CALL)
+
+
+def river_template(game, contrib: float) -> Template:
+    """The engine's river betting with `contrib` chips in from each player (one line, chips as
+    (1,) arrays); no betting (an all-in class's template) once nothing is behind."""
+    if contrib >= game.total:
+        return Template([], [], [], [], [("", np.zeros(1))])
+    s = river_start(game)._replace(contrib=(float(contrib), float(contrib)))
+    _, tp, _ = _walk(game, s)
+    return _class_template([tp])
 
 
 class FlopPair:
-    """The pieces built once per flop pair: game, flop+turn tree (for the turn deals and the
-    hands), river provider."""
+    """The pieces built once per flop pair: game, flop+turn tree (for the turn deals, the
+    hands and the river's line classes), river provider."""
 
-    def __init__(self, flops, num_ranks: int, num_suits: int):
-        self.game = Holdem(num_ranks=num_ranks, num_suits=num_suits, board_cards=(3, 1, 1), flops=flops,
-                           bet_sizes=(2, 4, 4))
+    def __init__(self, flops, num_ranks: int, num_suits: int, template: str = "limit"):
+        self.template = template
+        self.game = make_game(flops, num_ranks, num_suits, template)
         self.upper = holdem_public_tree(self.game, upto=2)
         self.river = HoldemRiver(self.game, self.upper)
         self.hands = np.array(self.upper.hands, dtype=np.int64)
+        # the real river lines that still have betting: (class, line within it)
+        self.lines = [(c, l) for c, lc in enumerate(self.upper.classes[2]) if lc.template.num_nodes > 0
+                      for l in range(lc.num_lines)]
+
+    def sample_betting(self, rng, spread: float = 2.0) -> dict:
+        """The river's betting for one sample: template, pot P (both players in for P/2),
+        stack (chips behind each), the real line it came from (street index, -1 for limit) and
+        the spread factor applied to that line's pot."""
+        if self.template == "limit":
+            pot = float(np.exp(rng.uniform(np.log(POT_RANGE[0]), np.log(POT_RANGE[1]))))
+            return {"template": line_template(self.upper.classes[2][0].template, 0), "pot": pot,
+                    "stack": STACK - pot / 2, "line": -1, "pot_spread": 1.0}
+        c, l = self.lines[int(rng.integers(len(self.lines)))]
+        lc = self.upper.classes[2][c]
+        factor = float(np.exp(rng.uniform(-np.log(spread), np.log(spread)))) if spread > 1 else 1.0
+        contrib = min(float(lc.contrib[l]) * factor, self.game.total - 0.5)  # keep something behind
+        contrib = max(contrib, self.game.ante)
+        tp = line_template(lc.template, l) if factor == 1.0 else river_template(self.game, contrib)
+        return {"template": tp, "pot": 2 * contrib, "stack": self.game.total - contrib,
+                "line": int(lc.lines[l]), "pot_spread": contrib / float(lc.contrib[l])}
 
     def turn_deal(self, turn) -> int:
         hit = np.flatnonzero((self.river.turn_cards == np.array(turn)).all(axis=1))
@@ -125,11 +185,9 @@ def turn_equity(st) -> np.ndarray:
     return np.divide(eq.sum(axis=0), seen[:, None], out=np.zeros(eq.shape[1:]), where=seen[:, None] > 0)
 
 
-def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, template: str = "limit",
-                 variant: str = "cfr+") -> dict:
-    """One sample: ranges, equity and the solved subgame (values and exploitability in pots)."""
-    if template != "limit":
-        raise ValueError("only the limit river template exists until the no-limit engine is merged")
+def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant: str = "cfr+") -> dict:
+    """One sample: ranges, equity and the solved subgame (values and exploitability in pots).
+    spot holds turn, template, pot and stack (sample_spot, then FlopPair.sample_betting)."""
     d = fp.turn_deal(spot["turn"])
     valid = fp.upper.streets[1].valid[d]
     st = fp.river_street(d)
@@ -137,7 +195,7 @@ def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, template
     strength = equity.mean(axis=1)
     r0, r1 = random_range(rng, valid, strength), random_range(rng, valid, strength)
     pot = spot["pot"]
-    sub = solve_subgame(st, fp.upper.templates[2], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
+    sub = solve_subgame(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
     cfv0, cfv1 = sub.values[0] / pot, sub.values[1] / pot  # both from the one average-strategy profile
     return {"range0": r0, "range1": r1, "possible": valid, "equity": equity, "cfv0": cfv0, "cfv1": cfv1,
             "zero_sum_residual": float(r0 @ cfv0 + r1 @ cfv1),
@@ -165,7 +223,8 @@ class Shard:
 
     PER_SAMPLE = {"flops": ((2, 3), "i1"), "turn": ((2,), "i1"), "hand_set": ((), "i4"), "pot": ((), "f4"),
                   "stack": ((), "f4"), "subgame_exploitability": ((), "f4"), "iters": ((), "i4"),
-                  "seconds": ((), "f4"), "mass": ((), "f4"), "zero_sum_residual": ((), "f4")}
+                  "seconds": ((), "f4"), "mass": ((), "f4"), "zero_sum_residual": ((), "f4"), "line": ((), "i4"),
+                  "pot_spread": ((), "f4")}
     PER_HAND = {"range0": ((), "f4"), "range1": ((), "f4"), "cfv0": ((), "f4"), "cfv1": ((), "f4"),
                 "equity": ((2,), "f4"), "possible": ((), "bool")}
 
@@ -214,7 +273,9 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="the shard (.h5)")
     ap.add_argument("--tol", type=float, default=1e-3, help="subgame exploitability target, in pots")
     ap.add_argument("--iters", type=int, default=5000, help="iteration cap per subgame")
-    ap.add_argument("--template", default="limit", choices=["limit"])
+    ap.add_argument("--template", default="pot", choices=["pot", "limit"],
+                    help="river betting: the real no-limit game's lines (pot) or the limit baseline")
+    ap.add_argument("--spread", type=float, default=2.0, help="pot spread factor around the real lines (pot)")
     ap.add_argument("--variant", default="dcfr", choices=["cfr+", "dcfr"],
                     help="subgame solver (DCFR: 2.9x faster than CFR+ to 1e-3 pots on the real deck)")
     ap.add_argument("--deck", default="13,4", help="ranks,suits (default the real deck)")
@@ -223,9 +284,14 @@ def main(argv=None):
     a = ap.parse_args(argv)
     num_ranks, num_suits = (int(x) for x in a.deck.split(","))
     rng = np.random.default_rng(a.seed)
+    betting = ({"bet_sizes": "2,4,4 (limit; river bet 4)", "pot_range": "log-uniform on [2, 200], stack = 101 - pot/2"}
+               if a.template == "limit" else
+               {"bet_sizes": "no-limit, sizes 0.5 and 1 pot, 2 aggressive actions per street, all-in when a size "
+                             "reaches the stack", "pot_range": f"a real river line with betting, uniform, pot x "
+                             f"exp(U(-ln {a.spread:g}, ln {a.spread:g})), stack = 101 - pot/2"})
     attrs = {"num_ranks": num_ranks, "num_suits": num_suits, "board_cards": "3,1,1", "num_boards": 2,
-             "ante": 1.0, "stack": STACK, "bet_sizes": "2,4,4 (limit; river bet 4)", "template": a.template,
-             "pot_range": "log-uniform on [2, 200], stack = 101 - pot/2", "tol_pots": a.tol, "iters_cap": a.iters,
+             "ante": 1.0, "total_chips": STACK, "template": a.template, "spread": a.spread, **betting,
+             "tol_pots": a.tol, "iters_cap": a.iters,
              "variant": a.variant, "seed": a.seed, "git": git_hash(), "per_flop": a.per_flop,
              "card_encoding": "card = rank * num_suits + suit, ranks 23456789TJQKA, suits cdhs", "units": UNITS}
     shard = None
@@ -234,7 +300,7 @@ def main(argv=None):
     for n in range(a.n):
         spot = sample_spot(rng, num_ranks, num_suits)
         if n % a.per_flop == 0:
-            fp = FlopPair(spot["flops"], num_ranks, num_suits)
+            fp = FlopPair(spot["flops"], num_ranks, num_suits, a.template)
             if shard is None:
                 shard = Shard(a.out, len(fp.hands), attrs)
             hand_set = shard.add_hands(fp.hands)
@@ -242,14 +308,16 @@ def main(argv=None):
             used = {c for f in fp.game.flops for c in f}
             rest = rng.permutation([c for c in range(num_ranks * num_suits) if c not in used])
             spot["flops"], spot["turn"] = fp.game.flops, (int(rest[0]), int(rest[1]))
+        spot.update(fp.sample_betting(rng, a.spread))
         t0 = time.perf_counter()
-        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.template, a.variant)
+        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.variant)
         row.update(flops=np.array(spot["flops"]), turn=np.array(spot["turn"]), hand_set=hand_set, pot=spot["pot"],
-                   stack=spot["stack"], seconds=time.perf_counter() - t0)
+                   stack=spot["stack"], line=spot["line"], pot_spread=spot["pot_spread"],
+                   seconds=time.perf_counter() - t0)
         shard.add(row)
         if (n + 1) % a.log_every == 0 or n + 1 == a.n:
             el = time.perf_counter() - start
-            print(f"sample {n + 1}/{a.n}  pot {spot['pot']:7.2f}  iters {row['iters']:5d}  expl "
+            print(f"sample {n + 1}/{a.n}  pot {spot['pot']:7.2f}  nodes {spot['template'].num_nodes:2d}  iters {row['iters']:5d}  expl "
                   f"{row['subgame_exploitability']:.2e} pots  solve {row['seconds']:6.1f}s  elapsed {el:7.0f}s  "
                   f"({el / (n + 1):.1f}s/sample)", flush=True)
     if shard is not None:

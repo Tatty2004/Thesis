@@ -84,10 +84,10 @@ def test_regrets_and_reach_match_in_lockstep(name):
             reach, regrets = b.instant_regrets(p)
             ra = a._instant_regret(p)
             xa = realization_plan(tree, p, a.sigma[p])
-            for n, (t, d, l, k, i) in enumerate(co[p]):
+            for n, (t, d, c, l, k, i) in enumerate(co[p]):
                 f, m = tree.first_seq[p][n], tree.num_actions[p][n]
-                assert np.abs(ra[f:f + m] - regrets[t][k][d, l, i]).max() < 1e-12
-                xb = b.own_reach(t, k, reach)[d, l, i] * b.sigma[t][k][d, l, i]
+                assert np.abs(ra[f:f + m] - regrets[t][c][k][d, l, i]).max() < 1e-12
+                xb = b.own_reach(t, c, k, reach)[d, l, i] * b.sigma[t][c][k][d, l, i]
                 assert np.abs(xa[f:f + m] - xb).max() < 1e-12
         a.iteration()
 
@@ -134,39 +134,39 @@ def test_bucketed_lockstep_and_total_error(name, method, k):
     ag = build_abstract_game(full, bucketing)
     ids = range_buckets(pt, bucketing)
     a, b = CFR(ag.tree), RangeCFR(pt, buckets=ids)
-    # Each abstract infoset is one (street, deal, line, node, id) of the range solver.
+    # Each abstract infoset is one (street, deal, class, line, node, id) of the range solver.
     where = []
     for p in (0, 1):
         co = tree_coordinates(pt, full, p)
-        c = np.full((ag.tree.n_infosets[p], 5), -1, dtype=np.int64)
-        flat = np.column_stack([co[:, :4], [ids[t][p][d, i] for t, d, _, _, i in co]])
+        c = np.full((ag.tree.n_infosets[p], 6), -1, dtype=np.int64)
+        flat = np.column_stack([co[:, :5], [ids[t][p][d, i] for t, d, _, _, _, i in co]])
         c[ag.infoset_map[p]] = flat
         assert (c[ag.infoset_map[p]] == flat).all() and (c >= 0).all()
         where.append(c)
     for _ in range(25):
         for p in (0, 1):
             for q in (0, 1):
-                for n, (t, d, l, kk, i) in enumerate(where[q]):
+                for n, (t, d, cc, l, kk, i) in enumerate(where[q]):
                     f, m = ag.tree.first_seq[q][n], ag.tree.num_actions[q][n]
-                    b.sigma[t][kk][d, l, i] = a.sigma[q][f:f + m]
+                    b.sigma[t][cc][kk][d, l, i] = a.sigma[q][f:f + m]
             reach, regrets = b.instant_regrets(p)
             ra = a._instant_regret(p)
             xa = realization_plan(ag.tree, p, a.sigma[p])
             own = {}
-            for n, (t, d, l, kk, i) in enumerate(where[p]):
+            for n, (t, d, cc, l, kk, i) in enumerate(where[p]):
                 f, m = ag.tree.first_seq[p][n], ag.tree.num_actions[p][n]
-                assert np.abs(ra[f:f + m] - regrets[t][kk][d, l, i]).max() < 1e-12
-                if (t, kk) not in own:
-                    own[(t, kk)] = b.own_reach(t, kk, reach)
-                assert np.abs(xa[f:f + m] - own[(t, kk)][d, l, i] * b.sigma[t][kk][d, l, i]).max() < 1e-12
+                assert np.abs(ra[f:f + m] - regrets[t][cc][kk][d, l, i]).max() < 1e-12
+                if (t, cc, kk) not in own:
+                    own[(t, cc, kk)] = b.own_reach(t, cc, kk, reach)
+                assert np.abs(xa[f:f + m] - own[(t, cc, kk)][d, l, i] * b.sigma[t][cc][kk][d, l, i]).max() < 1e-12
         a.iteration()
     # Total error: the range solver's full-game best response to the lifted strategy.
-    sigma = [[s.copy() for s in row] for row in b.sigma]
+    sigma = [[[s.copy() for s in cls] for cls in row] for row in b.sigma]
     avg = a.average_strategy()
     for q in (0, 1):
-        for n, (t, d, l, kk, i) in enumerate(where[q]):
+        for n, (t, d, cc, l, kk, i) in enumerate(where[q]):
             f, m = ag.tree.first_seq[q][n], ag.tree.num_actions[q][n]
-            sigma[t][kk][d, l, i] = avg[q][f:f + m]
+            sigma[t][cc][kk][d, l, i] = avg[q][f:f + m]
     ours = b.exploitability(sigma)
     ref = exploitability(full, ag.lift(avg))
     assert ours["exploitability"] == pytest.approx(ref.exploitability, abs=1e-12)
@@ -187,8 +187,8 @@ def test_three_streets_match_the_tree_solver():
             _, regrets = b.instant_regrets(p)
             ra = a._instant_regret(p)
             f, m = tree.first_seq[p], tree.num_actions[p]
-            for n, (t, d, l, k, i) in enumerate(co[p]):
-                assert np.abs(ra[f[n]:f[n] + m[n]] - regrets[t][k][d, l, i]).max() < 1e-12
+            for n, (t, d, c, l, k, i) in enumerate(co[p]):
+                assert np.abs(ra[f[n]:f[n] + m[n]] - regrets[t][c][k][d, l, i]).max() < 1e-12
         a.iteration()
     for sigma in [a.average_strategy(), random_profile(tree, 5)]:
         ours = RangeCFR(pt).exploitability(from_tree_sigma(pt, tree, sigma))

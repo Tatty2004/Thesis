@@ -11,9 +11,9 @@ returned values against street_values directly.
 import numpy as np
 import pytest
 
-from bombpot.core.public import DenseStreet, PublicTree
-from bombpot.core.solvers.range_cfr import RangeCFR, street_reach, street_values
-from bombpot.core.solvers.subgame import SubgameCFR, solve_subgame, solve_subgames
+from bombpot.core.public import DenseStreet, LineClass, PublicTree
+from bombpot.core.solvers.range_cfr import RangeCFR, class_reach, class_values
+from bombpot.core.solvers.subgame import SubgameCFR, line_template, solve_subgame, solve_subgames
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
 
@@ -25,6 +25,12 @@ def setup():
     upper = holdem_public_tree(GAME, upto=2)
     river = HoldemRiver(GAME, upper)
     return upper, river
+
+
+def river_line(upper, line):
+    """The river's (one-line template, chips in) for line `line` of the limit game's one class."""
+    (lc,) = upper.classes[2]
+    return line_template(lc.template, line), lc.contrib[line]
 
 
 def ranges(H, seed, valid=None):
@@ -43,14 +49,16 @@ def dense_tree(st, template, contrib, r0, r1):
     S = np.swapaxes(st.share(eye, 0), 1, 2)  # S[d, i, j]
     outer = r0[None, :, None] * r1[None, None, :]
     dense = DenseStreet(list(range(D)), np.full(D, -1, dtype=np.int64), W * outer, S * outer)
-    return PublicTree("dense", list(range(H)), [dense], [template], [np.array([float(contrib)])])
+    none = np.full(1, -1, dtype=np.int64)
+    lc = LineClass(template, np.arange(1), np.array([float(contrib)]), np.array([np.inf]), none, none, none)
+    return PublicTree("dense", list(range(H)), [dense], [[lc]])
 
 
 @pytest.mark.parametrize("d, line", [(0, 0), (17, 3), (50, 12)])
 def test_subgame_matches_range_cfr_on_the_dense_game(setup, d, line):
     upper, river = setup
     st = river.street(*river.all_children([d]))
-    template, contrib = upper.templates[2], upper.contrib[2][line]
+    template, contrib = river_line(upper, line)
     H = len(upper.hands)
     r = ranges(H, d)
     a = SubgameCFR(st, template, [contrib], (r[0], r[1]))
@@ -59,13 +67,13 @@ def test_subgame_matches_range_cfr_on_the_dense_game(setup, d, line):
     for it in range(30):
         # Lockstep: the same strategies give the same regrets, scaled by own root reach.
         for p in (0, 1):
-            b.sigma = [[s.copy() for s in a.sigma[0]]]
+            b.sigma = [[[s.copy() for s in a.sigma[0][0]]]]
             _, ra = a.instant_regrets(p)
             _, rb = b.instant_regrets(p)
             for k, q in nodes:
                 if q == p:
-                    want = ra[0][k] * r[p][None, None, :, None]
-                    np.testing.assert_allclose(rb[0][k], want, rtol=0, atol=1e-13 * max(1.0, np.abs(want).max()))
+                    want = ra[0][0][k] * r[p][None, None, :, None]
+                    np.testing.assert_allclose(rb[0][0][k], want, rtol=0, atol=1e-13 * max(1.0, np.abs(want).max()))
         a.iteration()
     # Whole updates in lockstep: from the same state (regrets x own root reach, averages /
     # own root reach, the same strategy), one iteration gives the same state again. Free-running
@@ -74,22 +82,22 @@ def test_subgame_matches_range_cfr_on_the_dense_game(setup, d, line):
     for it in range(20):
         b.t = a.t
         scale = [r[q][None, None, :, None] for q in template.players]
-        b.sigma = [[s.copy() for s in a.sigma[0]]]
-        b.regret = [[x * c for x, c in zip(a.regret[0], scale)]]
-        b.cum = [[x / c for x, c in zip(a.cum[0], scale)]]
+        b.sigma = [[[s.copy() for s in a.sigma[0][0]]]]
+        b.regret = [[[x * c for x, c in zip(a.regret[0][0], scale)]]]
+        b.cum = [[[x / c for x, c in zip(a.cum[0][0], scale)]]]
         a.iteration()
         b.iteration()
         for k, c in enumerate(scale):
-            np.testing.assert_allclose(b.regret[0][k], a.regret[0][k] * c, rtol=1e-9,
-                                       atol=1e-13 * np.abs(b.regret[0][k]).max())
-            np.testing.assert_allclose(b.cum[0][k] * c, a.cum[0][k], rtol=1e-11, atol=1e-15)
+            np.testing.assert_allclose(b.regret[0][0][k], a.regret[0][0][k] * c, rtol=1e-9,
+                                       atol=1e-13 * np.abs(b.regret[0][0][k]).max())
+            np.testing.assert_allclose(b.cum[0][0][k] * c, a.cum[0][0][k], rtol=1e-11, atol=1e-15)
     # The same best responses and values of the average strategy.
     ev = a.evaluate()
     hsig = b.hand_sigma(a.average_strategy())
     reach = b.reach(hsig)
     for p in (0, 1):
         for mode, key in (("cfr", "values"), ("br", "br_values")):
-            vb = b.values(p, hsig, reach, mode)[0][0][0].sum(0)[0]
+            vb = b.values(p, hsig, reach, mode)[0][0][0][0].sum(0)[0]
             np.testing.assert_allclose(vb, ev[key][p][0, 0] * r[p], rtol=1e-12, atol=1e-18)
 
 
@@ -97,18 +105,18 @@ def test_values_are_in_street_values_units(setup):
     upper, river = setup
     d, line = 33, 7
     st = river.street(*river.all_children([d]))
-    template, contrib = upper.templates[2], upper.contrib[2][line]
+    template, contrib = river_line(upper, line)
     r = ranges(len(upper.hands), 4, upper.streets[1].valid[d])
     sub = solve_subgame(st, template, contrib, r[0], r[1], iters=1000, tol=1e-3)
     assert sub.exploitability <= 1e-3 and sub.iterations < 1000
     D, H = st.num_deals, len(upper.hands)
     hsig = [s[:, None] for s in sub.strategy]  # (D, 1, H, A)
     root = tuple(np.broadcast_to(x, (D, 1, H)).copy() for x in r)
-    nodes, _ = street_reach(template, hsig, root)
+    nodes, _ = class_reach(template, hsig, root)
     for p in (0, 1):
-        V, _ = street_values(template, st, np.array([contrib]), hsig, nodes, p, "cfr", True)
+        V, _ = class_values(template, st, np.array([contrib]), hsig, nodes, p, "cfr", True)
         np.testing.assert_allclose(sub.values[p], V[0][:, 0].sum(0), rtol=1e-12, atol=1e-18)
-        Vb, _ = street_values(template, st, np.array([contrib]), hsig, nodes, p, "br", True)
+        Vb, _ = class_values(template, st, np.array([contrib]), hsig, nodes, p, "br", True)
         np.testing.assert_allclose(sub.br_values[p], Vb[0][:, 0].sum(0), rtol=1e-12, atol=1e-18)
     # Exploitability in chips: (br0 + br1) / 2 over the root reach mass; zero-sum value.
     mass = (st.fold(root[1], 0)[:, 0] * r[0]).sum()
@@ -132,11 +140,13 @@ def test_a_batch_is_independent_subgames(setup):
         for j in range(2):
             x = ranges(H, 10 * g + j)
             r[0][g, j], r[1][g, j] = x
-    batch = solve_subgames(st, upper.templates[2], upper.contrib[2][lines], r[0], r[1], group, iters=40)
+    (lc,) = upper.classes[2]
+    batch = solve_subgames(st, line_template(lc.template, lines), lc.contrib[lines], r[0], r[1], group, iters=40)
     for g, d in enumerate(deals):
         one = river.street(*river.all_children([d]))
         for j, line in enumerate(lines):
-            sub = solve_subgame(one, upper.templates[2], upper.contrib[2][line], r[0][g, j], r[1][g, j], iters=40)
+            tp, contrib = river_line(upper, line)
+            sub = solve_subgame(one, tp, contrib, r[0][g, j], r[1][g, j], iters=40)
             for p in (0, 1):
                 np.testing.assert_allclose(batch.values[p][g, j], sub.values[p], rtol=1e-12, atol=1e-18)
             assert batch.exploitability[g, j] == pytest.approx(sub.exploitability, rel=1e-10)

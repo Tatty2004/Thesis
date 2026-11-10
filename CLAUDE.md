@@ -75,7 +75,8 @@ bombpot/
   core/          game.py (Game and CardGame protocols), limit.py (limit-betting engine, LimitPoker),
                  betting.py (no-limit / pot-limit engine with pot-fraction sizes, stacks and all-in, PotPoker),
                  tree.py (compile a Game to sequence-form arrays, strategy utilities, saved strategies),
-                 public.py (public tree for range solvers: betting templates, deals, fold/share operators),
+                 public.py (public tree for range solvers: line classes with their betting templates, deals,
+                 fold/share operators),
                  removal.py (card-removal fold/showdown sums in O(hands) per deal, compiled),
                  jit.py (compile kernels in parallel and serial variants, picked by problem size)
     solvers/     cfr.py (CFR, CFR+, DCFR on the tree), range_cfr.py (the same on the public tree, ranges as

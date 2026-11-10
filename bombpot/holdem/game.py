@@ -2,7 +2,12 @@
 
 Ante, two private cards each (player 0 first, one deck), then on every street
 `board_cards[t]` cards to each board followed by a limit betting round, then showdown.
-There is no betting before the first board cards. On each board a player's hand is the
+There is no betting before the first board cards.
+
+Betting: `betting="limit"` (the default) is the limit engine (core/limit.py, `ante`,
+`bet_sizes`, `max_raises`); `betting="pot"` is the no-limit / pot-limit engine
+(core/betting.py, `ante`, `stack`, `sizes`, `max_aggressive`, `limit`), which makes a
+`PotHoldem`, a subclass of Holdem with the same dealing, showdowns and keys. On each board a player's hand is the
 best five-card hand from their two cards plus that board's cards (all of them when
 there are fewer than five). Each board is worth half the pot, and equal hands split
 that board's half. Board cards play for both players.
@@ -22,6 +27,7 @@ from __future__ import annotations
 from itertools import combinations
 from math import comb
 
+from bombpot.core.betting import PotPoker
 from bombpot.core.limit import LimitPoker, PokerState
 from bombpot.holdem.cards import Deck
 from bombpot.holdem.evaluator import hand_value
@@ -30,10 +36,24 @@ DECK_MODES = ("shared", "identical")
 HOLE_CARDS = 2
 
 
+BETTINGS = ("limit", "pot")
+
+
 class Holdem(LimitPoker):
+    """Hold'em dealing, showdowns and keys on a betting engine: LimitPoker, or PotPoker for
+    `betting="pot"` (then the instance is a PotHoldem)."""
+
+    def __new__(cls, *args, betting: str = "limit", **kwargs):
+        if betting not in BETTINGS:
+            raise ValueError(f"betting must be one of {BETTINGS}")
+        if cls is Holdem and betting == "pot":
+            cls = PotHoldem
+        return super().__new__(cls)
 
     def __init__(self, num_ranks: int = 13, num_suits: int = 4, board_cards=(3, 1), num_boards: int = 2,
-                 deck_mode: str = "shared", flops=None, ante: float = 1.0, bet_sizes=(2.0, 4.0, 4.0), max_raises=2):
+                 deck_mode: str = "shared", flops=None, ante: float = 1.0, bet_sizes=(2.0, 4.0, 4.0), max_raises=2,
+                 betting: str = "limit", stack: float = 100.0, sizes=(0.5, 1.0), max_aggressive=2,
+                 limit: str = "no-limit"):
         if num_boards not in (1, 2):
             raise ValueError("num_boards must be 1 or 2")
         if deck_mode not in DECK_MODES:
@@ -65,13 +85,23 @@ class Holdem(LimitPoker):
                 events.extend([("board", 0)] if deck_mode == "identical" else [("board", j) for j in range(num_boards)])
             events.append(("bet", t))
         events.append(("showdown",))
-        super().__init__(events, num_boards, ante, list(bet_sizes)[:streets], list(max_raises)[:streets])
+        if betting == "limit":
+            LimitPoker.__init__(self, events, num_boards, ante, list(bet_sizes)[:streets], list(max_raises)[:streets])
+        else:
+            if isinstance(max_aggressive, int):
+                max_aggressive = [max_aggressive] * streets
+            PotPoker.__init__(self, events, num_boards, ante, stack, sizes, list(max_aggressive)[:streets], limit)
+        self.betting = betting
         self._combos = {k: list(combinations(self.deck.cards, k)) for k in {HOLE_CARDS, *board_cards}}
         self._index = {k: {c: i for i, c in enumerate(v)} for k, v in self._combos.items()}
         self._values: dict = {}
         self.params = dict(num_ranks=num_ranks, num_suits=num_suits, board_cards=list(board_cards),
-                           num_boards=num_boards, deck_mode=deck_mode, ante=self.ante,
-                           bet_sizes=list(self.bet_sizes), max_raises=list(self.max_raises))
+                           num_boards=num_boards, deck_mode=deck_mode, ante=self.ante)
+        if betting == "limit":  # the limit game's params and name are unchanged, so stored results stay valid
+            self.params.update(bet_sizes=list(self.bet_sizes), max_raises=list(self.max_raises))
+        else:
+            self.params.update(betting="pot", stack=self.stack, sizes=list(self.sizes),
+                               max_aggressive=list(self.max_aggressive), limit=self.limit)
         if self.flops is not None:
             self.params["flops"] = [self.deck.cards_str(f) for f in self.flops]
         self.name = "holdem(" + ",".join(f"{k}={v}" for k, v in self.params.items()) + ")"
@@ -137,3 +167,9 @@ class Holdem(LimitPoker):
     def infoset_key(self, s: PokerState, player: int) -> str:
         # Own cards, then public info only; the opponent's cards never appear.
         return f"{player}:{self.deck.cards_str(s.hands[player])}:{self.public_key(s)}"
+
+
+class PotHoldem(Holdem, PotPoker):
+    """Hold'em on the no-limit / pot-limit engine: made by `Holdem(..., betting="pot")`.
+    Holdem's dealing, showdowns and keys come first in the method order, then PotPoker's
+    betting, then LimitPoker's shared machinery."""
