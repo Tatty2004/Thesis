@@ -1,0 +1,25 @@
+# The small test deck (5 ranks x 3 suits, H = 36): for the subgame stream's shards once they
+# exist (set data.dir to their directory or pass --data). DeepStack's network, 2D bins.
+data:
+  dir: results/valuenet/data/small_deck
+  holdout_fraction: 0.2
+  block: 1024
+features:
+  method: joint_2d
+  n_bins: 10
+  board: onehot
+  num_ranks: 5
+  num_suits: 3
+model:
+  depth: 7
+  width: 500
+  zero_sum: true
+train:
+  epochs: 200
+  batch_size: 1024
+  lr: 0.001
+  schedule: cosine
+  huber_delta: 1.0
+  seed: 0
+  threads: 8
+  device: auto

@@ -1,8 +1,9 @@
 """The layering rules from CLAUDE.md, checked on the source.
 
 core/ is game-agnostic: it imports no layer and names no game. The layers (toygames/,
-holdem/) build on core/ only and never import each other. experiments/ may use
-everything. OpenSpiel appears only in tests/.
+holdem/, valuenet/) build on core/ only and never import each other. experiments/ may use
+everything. OpenSpiel appears only in tests/. torch and h5py appear only in valuenet/ and
+experiments/valuenet/.
 """
 import re
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 
 PKG = Path(__file__).resolve().parents[1] / "bombpot"
-LAYERS = ["toygames", "holdem"]
+LAYERS = ["toygames", "holdem", "valuenet"]
 SPECIFIC = re.compile(r"\b(kuhn|leduc|board_leduc|holdem|Kuhn|Leduc|BoardLeduc|Holdem|make_game|GAMES)\b")
 
 
@@ -38,3 +39,12 @@ def test_layers_build_on_core_only(layer):
 def test_open_spiel_only_in_tests():
     for path in PKG.rglob("*.py"):
         assert "pyspiel" not in path.read_text() and "open_spiel" not in path.read_text(), path.name
+
+
+def test_torch_and_h5py_only_in_valuenet():
+    allowed = (PKG / "valuenet", PKG / "experiments" / "valuenet")
+    for path in PKG.rglob("*.py"):
+        if any(a in path.parents for a in allowed):
+            continue
+        for line in imports(path):
+            assert not re.search(r"\b(torch|h5py)\b", line), f"{path.name}: {line}"
