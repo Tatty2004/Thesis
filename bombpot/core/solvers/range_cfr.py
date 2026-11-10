@@ -346,19 +346,32 @@ def street_values(classes_t, st, hsig_t, reach_t, p: int, mode: str, last: bool,
     return V, R
 
 
-def backward(pt: PublicTree, hsig, reach, p: int, mode: str = "cfr"):
+def backward(pt: PublicTree, hsig, reach, p: int, mode: str = "cfr", leaf=None):
     """Player p's counterfactual value of each hand at every decision node, bottom-up:
     values[t][c][k] (entry 0 is the class root's).
 
     mode "cfr": p plays hsig; returns (values, regrets at p's nodes).
     mode "br":  p best-responds; returns (values, None for every node).
+
+    leaf: a value provider for the lines that close pt's last street (pt then stops there,
+    e.g. at the end of the turn). leaf.values(p, t, closing) gets that street's closing reach
+    as forward(..., closing=True) gives it, closing[c] = (reach0, reach1) each (D, L_c,
+    closes_c, H), and returns player p's values per hand in the solver's units, agg[c] shaped
+    (D, L_c, closes_c, H): what close_values would give from the streets below. In mode "br"
+    the provider still returns its own values (a value function, not a strategy).
     """
     T = pt.num_streets
     all_values, all_regrets = [None] * T, [None] * T
     agg = None
     for t in range(T - 1, -1, -1):
         st = pt.streets[t]
-        V, R = street_values(pt.classes[t], st, hsig[t], reach[t], p, mode, t == len(pt.classes) - 1, agg)
+        if leaf is not None and t == T - 1:
+            _, close = street_reach(pt.classes[t], hsig[t], [r[0] for r in reach[t]])
+            agg = leaf.values(p, t, stack_closing(close))
+            last = False
+        else:
+            last = leaf is None and t == len(pt.classes) - 1
+        V, R = street_values(pt.classes[t], st, hsig[t], reach[t], p, mode, last, agg)
         all_values[t], all_regrets[t] = V, R
         if t > 0:
             agg = close_values([v[0] for v in V], pt.classes[t - 1], pt.classes[t], st.parent,
@@ -369,9 +382,12 @@ def backward(pt: PublicTree, hsig, reach, p: int, mode: str = "cfr"):
 class RangeCFR(IterativeSolver):
 
     def __init__(self, pt: PublicTree, variant: str = "dcfr", alpha: float = 1.5, beta: float = 0.0,
-                 gamma: float = 2.0, buckets=None):
+                 gamma: float = 2.0, buckets=None, leaf=None):
+        """leaf: a value provider for the lines that close pt's last street (see backward);
+        pt.classes may cover more streets than pt.streets (they're ignored here)."""
         if variant not in ("cfr", "cfr+", "dcfr"):
             raise ValueError(f"unknown variant {variant!r}")
+        self.leaf = leaf
         self.pt, self.variant = pt, variant
         self.alpha, self.beta, self.gamma = alpha, beta, gamma
         self.t = 0
@@ -446,7 +462,7 @@ class RangeCFR(IterativeSolver):
         return forward(self.pt, hsig)
 
     def values(self, p: int, hsig, reach, mode: str = "cfr"):
-        return backward(self.pt, hsig, reach, p, mode)
+        return backward(self.pt, hsig, reach, p, mode, leaf=self.leaf)
 
     # Iterations ---------------------------------------------------------------------
 
