@@ -78,7 +78,7 @@ def holdem_public_tree(game: Holdem, upto: int | None = None) -> PublicTree:
         streets.append(street)
         prev_index = street.index
         level = [(boards, w) for _, boards, w in keyed]
-    return PublicTree(game.name, hands, streets, *betting(game))
+    return PublicTree(game.name, hands, streets, betting(game))
 
 
 def _board_key(boards: tuple) -> tuple:

@@ -55,8 +55,9 @@ def lift(full, river, abstraction, sigma):
     st = river.street(parents, children)
     rows = abstraction.rows(parents, children)
     ids = [np.asarray(abstraction.ids(st, parents, children, p)) for p in (0, 1)]
-    last = [s[rows[:, None], :, ids[q]].transpose(0, 2, 1, 3) for s, q in zip(sigma[2], full.templates[2].players)]
-    return [list(sigma[0]), list(sigma[1]), last], st, rows, ids
+    players = full.classes[2][0].template.players
+    last = [s[rows[:, None], :, ids[q]].transpose(0, 2, 1, 3) for s, q in zip(sigma[2], players)]
+    return [[list(sigma[0])], [list(sigma[1])], [last]], st, rows, ids  # range solver layout: [t][c][k]
 
 
 @pytest.mark.parametrize("name", ["lossless", "avg_1d", "kmeans_2d"])
@@ -77,14 +78,14 @@ def full_width_regrets(full, river, abstraction, solver, p):
     rc = RangeCFR(full)
     _, R = rc.values(p, hsig, rc.reach(hsig))
     out = [[np.zeros_like(r) for r in row] for row in solver.regret]
-    for t, tp in enumerate(full.templates):
-        for k, q in enumerate(tp.players):
+    for t, row in enumerate(full.classes):
+        for k, q in enumerate(row[0].template.players):
             if q != p:
                 continue
             if t < 2:
-                out[t][k] = R[t][k]
+                out[t][k] = R[t][0][k]
             else:
-                touched, sums = solver._scatter(R[t][k], rows, ids[p], st.possible(p))
+                touched, sums = solver._scatter(R[t][0][k], rows, ids[p], st.possible(p))
                 out[t][k][touched] = sums
     return out
 
@@ -205,11 +206,11 @@ def test_an_iteration_applies_its_sample(setup, name):
     played = [[s.copy() for s in row] for row in solver.sigma]
     inst = solver.instant_regrets(0, *sample)
     view, rows, ids = solver.view(*sample)
-    reach = forward(view, solver.view_sigma(played, sample[0], rows, ids))
+    reach = [r[0] for r in forward(view, [[h] for h in solver.view_sigma(played, sample[0], rows, ids)])]
     solver.iteration()
     S = sample[0]
-    for tt, tp in enumerate(upper.templates):
-        for k, q in enumerate(tp.players):
+    for tt, row in enumerate(upper.classes):
+        for k, q in enumerate(row[0].template.players):
             if q != 0:
                 continue
             np.testing.assert_allclose(solver.regret[tt][k], regret[tt][k] + t * inst[tt][k], rtol=1e-12, atol=1e-15)

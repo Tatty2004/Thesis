@@ -40,13 +40,13 @@ def show(label: str, x: np.ndarray) -> str:
 
 def report(tree, a, b, co, own, p: int, seqs: np.ndarray) -> None:
     for n in sorted({int(own[p][s]) for s in seqs}):
-        t, d, l, k, i = co[p][n]
+        t, d, c, l, k, i = co[p][n]
         f, m = tree.first_seq[p][n], tree.num_actions[p][n]
         print(f"  player {p} infoset {tree.keys[p][n]}")
         print("    " + show("tree  regret", a.regret[p][f:f + m]))
-        print("    " + show("range regret", b.regret[t][k][d, l, i]))
+        print("    " + show("range regret", b.regret[t][c][k][d, l, i]))
         print("    " + show("tree  sigma ", a.sigma[p][f:f + m]))
-        print("    " + show("range sigma ", b.sigma[t][k][d, l, i]))
+        print("    " + show("range sigma ", b.sigma[t][c][k][d, l, i]))
 
 
 def run(tree, pt, co, own, variant: str, iterations: int) -> None:

@@ -59,18 +59,22 @@ def test_fixed_flop_games_match_the_lp(kw):
 def random_sigma(pt, seed):
     rng = np.random.default_rng(seed)
     out = []
-    for t, tp in enumerate(pt.templates):
+    for t, classes in enumerate(pt.classes):
         row = []
-        for a in tp.actions:
-            x = rng.random(pt.shape(t) + (len(a),)) ** 3  # lopsided, so mistakes show
-            row.append(x / x.sum(-1, keepdims=True))
+        for c, lc in enumerate(classes):
+            cls = []
+            for a in lc.template.actions:
+                x = rng.random(pt.shape(t, c) + (len(a),)) ** 3  # lopsided, so mistakes show
+                cls.append(x / x.sum(-1, keepdims=True))
+            row.append(cls)
         out.append(row)
     return out
 
 
 def brute_force_values(game, pt, sigma, reach, d, line, player):
     """Player's counterfactual value of every hand at the last street's root, deal d."""
-    st, tp = pt.streets[-1], pt.templates[-1]
+    st, lc = pt.streets[-1], pt.classes[-1][0]  # one class per street in the limit game
+    tp = lc.template
     hands = pt.hands
     H = len(hands)
     key = st.deals[d]
@@ -82,23 +86,23 @@ def brute_force_values(game, pt, sigma, reach, d, line, player):
     strength = np.array([[game.hand_value(h + b) if v else 0 for h, v in zip(hands, valid)] for b in boards])
     share0 = np.mean([(s[:, None] > s[None, :]) + 0.5 * (s[:, None] == s[None, :]) for s in strength], axis=0)
     o = 1 - player
-    root_o = reach[-1][0][o][d, line]
-    contrib = pt.contrib[-1][line]
+    root_o = reach[-1][0][0][o][d, line]
+    contrib = lc.contrib[line]
     out = np.zeros(H)
 
     def walk(k, path):  # path: per player, the probability of their actions so far, per hand
         for a, child in enumerate(tp.children[k]):
             q = tp.players[k]
             nxt = [path[0], path[1]]
-            nxt[q] = path[q] * sigma[-1][k][d, line, :, a]
+            nxt[q] = path[q] * sigma[-1][0][k][d, line, :, a]
             if child[0] == "node":
                 walk(child[1], nxt)
                 continue
             if child[0] == "fold":
-                lost = contrib + child[2]
+                lost = contrib + child[2][line]
                 u0 = np.full((H, H), -lost if child[1] == 0 else lost)
             else:
-                chips = contrib + tp.closes[child[1]][1]
+                chips = contrib + tp.closes[child[1]][1][line]
                 u0 = chips * (2 * share0 - 1)
             if player == 0:
                 out[:] += nxt[0] * ((W * u0) @ (root_o * nxt[1]))
@@ -121,7 +125,7 @@ def test_real_deck_values_match_brute_force():
         for d in (0, 777, 2069):
             for line in (0, 3):
                 want = brute_force_values(game, pt, sigma, reach, d, line, player)
-                np.testing.assert_allclose(values[-1][0][d, line], want, rtol=1e-11, atol=1e-16)
+                np.testing.assert_allclose(values[-1][0][0][d, line], want, rtol=1e-11, atol=1e-16)
 
 
 # Symmetries ------------------------------------------------------------------------------
@@ -137,10 +141,12 @@ def permuted(pt_from, pt_to, sigma, card_map):
     for t, (sf, stt) in enumerate(zip(pt_from.streets, pt_to.streets)):
         deal_perm = np.array([stt.index[tuple(card_map[c] for c in key)] for key in sf.deals])
         row = []
-        for s in sigma[t]:
-            x = np.empty_like(s)
-            x[np.ix_(deal_perm, np.arange(s.shape[1]), hand_perm)] = s
-            row.append(x)
+        for cls in sigma[t]:
+            row.append([])
+            for s in cls:
+                x = np.empty_like(s)
+                x[np.ix_(deal_perm, np.arange(s.shape[1]), hand_perm)] = s
+                row[-1].append(x)
         out.append(row)
     return out
 
@@ -166,10 +172,12 @@ def test_swapping_boards_changes_nothing():
     for t, (sa, sb) in enumerate(zip(pt_ab.streets, pt_ba.streets)):
         perm = np.array([sb.index[swap[key]] for key in sa.deals])
         row = []
-        for s in sigma[t]:
-            x = np.empty_like(s)
-            x[perm] = s
-            row.append(x)
+        for cls in sigma[t]:
+            row.append([])
+            for s in cls:
+                x = np.empty_like(s)
+                x[perm] = s
+                row[-1].append(x)
         moved.append(row)
     assert_same_grades(pt_ab, sigma, pt_ba, moved)
 
