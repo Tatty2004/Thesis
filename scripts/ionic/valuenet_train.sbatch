@@ -3,7 +3,11 @@
 # train.py, e.g.
 #   sbatch scripts/ionic/valuenet_train.sbatch --config bombpot/experiments/configs/valuenet/small_deck.yaml
 #   sbatch --time=00:15:00 scripts/ionic/valuenet_train.sbatch \
-#       --config bombpot/experiments/configs/valuenet/synthetic_smoke.yaml --synthetic   (GPU path check)
+#       --config bombpot/experiments/configs/valuenet/synthetic_smoke.yaml --synthetic --data @LOCAL@/data
+#       (GPU path check, synthetic shards written to node-local disk)
+# @LOCAL@ in the arguments becomes a node-local directory for this job, removed at exit (for
+# data that shouldn't sit on shared storage, e.g. shards staged with STAGE=<shard dir>, which
+# copies the *.h5 files of that directory to @LOCAL@/data first).
 # Uses the torch environment on scratch (PY=... overrides it).
 #SBATCH --job-name=valuenet_train
 #SBATCH --partition=all
@@ -16,7 +20,14 @@
 export PY=${PY:-/n/fs/scratch/rb5709/envs/torch/bin/python}
 source "$SLURM_SUBMIT_DIR/scripts/ionic/env.sh"
 export PYTHONPATH="$SLURM_SUBMIT_DIR${PYTHONPATH:+:$PYTHONPATH}"  # this checkout, not the editable install's
+LOCAL="${TMPDIR:-/tmp}/$USER-valuenet-$SLURM_JOB_ID"
+mkdir -p "$LOCAL"
+trap 'rm -rf "$NUMBA_CACHE_DIR" "$LOCAL"' EXIT
+if [[ -n ${STAGE:-} ]]; then
+    mkdir -p "$LOCAL/data" && cp "$STAGE"/*.h5 "$LOCAL/data/" && echo "staged $(ls "$LOCAL/data" | wc -l) shards from $STAGE"
+fi
+ARGS=("${@//@LOCAL@/$LOCAL}")
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader || true
 $PY -c "import torch, h5py; print('torch', torch.__version__, '| cuda', torch.cuda.is_available(), torch.version.cuda, '|', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no gpu', '| h5py', h5py.__version__)"
 
-$PY -m bombpot.experiments.valuenet.train "$@"
+$PY -m bombpot.experiments.valuenet.train "${ARGS[@]}"
