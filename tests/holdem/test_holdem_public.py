@@ -24,6 +24,9 @@ SMALL = {
     "5x2-3-b1": dict(num_ranks=5, num_suits=2, board_cards=(3,), num_boards=1),       # straights, flushes
     "5x3-3+1-flops": dict(num_ranks=5, num_suits=3, board_cards=(3, 1), flops=("2c3c4d", "5c6d4c")),
     "6x2-2+1-flops": dict(num_ranks=6, num_suits=2, board_cards=(2, 1), flops=("2c7d", "3c3d")),
+    # No-limit, 6 behind: five turn classes, one of them all-in (core/betting.py)
+    "5x3-3+1-flops-pot": dict(num_ranks=5, num_suits=3, board_cards=(3, 1), flops=("2c3c4d", "5c6d4c"), betting="pot",
+                              stack=6),
 }
 _built = {}
 
@@ -39,9 +42,14 @@ def built(name):
 def test_same_public_tree_as_the_dense_one(name):
     _, dense, fast = built(name)
     assert fast.hands == dense.hands
-    assert [t.hist for t in fast.templates] == [t.hist for t in dense.templates]
-    for a, b in zip(fast.contrib, dense.contrib):
-        np.testing.assert_array_equal(a, b)
+    assert [[c.template.hist for c in row] for row in fast.classes] == [[c.template.hist for c in row]
+                                                                       for row in dense.classes]
+    for a, b in zip(fast.classes, dense.classes):
+        for x, y in zip(a, b):
+            np.testing.assert_array_equal(x.contrib, y.contrib)
+            np.testing.assert_array_equal(x.lines, y.lines)
+            np.testing.assert_array_equal(x.parent_line, y.parent_line)
+            np.testing.assert_array_equal(x.parent_close, y.parent_close)
     rng = np.random.default_rng(0)
     for t, (f, d) in enumerate(zip(fast.streets, dense.streets)):
         assert f.deals == d.deals
@@ -56,7 +64,7 @@ def test_same_public_tree_as_the_dense_one(name):
                 np.testing.assert_allclose(f.share(reach, p), d.share(reach, p), rtol=0, atol=1e-13 * scale)
 
 
-@pytest.mark.parametrize("name", ["4x2-1-b2", "5x3-3+1-flops", "6x2-2+1-flops"])
+@pytest.mark.parametrize("name", ["4x2-1-b2", "5x3-3+1-flops", "6x2-2+1-flops", "5x3-3+1-flops-pot"])
 def test_range_solver_sees_the_same_game(name):
     # Lockstep along one run: the same strategies in, the same regrets out. (Free-running
     # runs part ways at regrets that are exactly zero by symmetry, which the two trees
@@ -64,14 +72,15 @@ def test_range_solver_sees_the_same_game(name):
     _, dense, fast = built(name)
     a, b = RangeCFR(dense), RangeCFR(fast)
     for _ in range(15):
-        b.sigma = [[s.copy() for s in row] for row in a.sigma]
+        b.sigma = [[[s.copy() for s in cls] for cls in row] for row in a.sigma]
         for p in (0, 1):
             _, ra = a.instant_regrets(p)
             _, rb = b.instant_regrets(p)
             for x, y in zip(ra, rb):
-                for u, v in zip(x, y):
-                    if u is not None:
-                        np.testing.assert_allclose(u, v, rtol=0, atol=1e-13)
+                for cx, cy in zip(x, y):
+                    for u, v in zip(cx, cy):
+                        if u is not None:
+                            np.testing.assert_allclose(u, v, rtol=0, atol=1e-13)
         a.iteration()
     ea, eb = a.exploitability(), b.exploitability(a.average_strategy())
     for key in ea:

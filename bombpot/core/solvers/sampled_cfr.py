@@ -17,6 +17,11 @@ hands by equity, as poker solvers do for the river.
 
 Regrets and averages use linear weighting (iteration t counts t), as in Pluribus (Brown
 and Sandholm 2019), which needs no discounting of the infosets a sample skips.
+
+This solver handles games with one line class per street (core/public.py), which is every
+limit game. Its storage stays per street and node, regret[t][k] shaped (D, L, ids, A) (the
+layout of M1's checkpoints); the range solver's passes, which take [t][c][k], see it as
+class 0.
 """
 from __future__ import annotations
 
@@ -32,8 +37,7 @@ from numba import prange
 from bombpot.core.jit import kernel
 from bombpot.core.public import PublicTree
 from bombpot.core.solvers.cfr import IterativeSolver
-from bombpot.core.solvers.range_cfr import (backward, close_values, forward, next_root, street_reach,
-                                            street_values)
+from bombpot.core.solvers.range_cfr import backward, class_reach, class_values, close_values, forward, next_root
 
 
 @kernel
@@ -50,6 +54,23 @@ def _update(regret, instant, sigma, cum, own, w):
                 total += regret[n, a]
         for a in range(A):
             sigma[n, a] = (max(regret[n, a], 0.0) / total) if total > 0.0 else 1.0 / A
+
+
+def one_class(pt: PublicTree) -> list:
+    """Each street's single LineClass (ValueError if a street has several)."""
+    if any(len(row) != 1 for row in pt.classes):
+        raise ValueError("the sampled solver needs one line class per street")
+    return [row[0] for row in pt.classes]
+
+
+def _classed(x: list) -> list:
+    """[t][k] -> [t][0][k], as the range solver's passes take them."""
+    return [[row] for row in x]
+
+
+def _unclassed(x: list) -> list:
+    """[t][0][k] -> [t][k]."""
+    return [row[0] for row in x]
 
 
 def _matching(regret: np.ndarray) -> np.ndarray:
@@ -75,11 +96,12 @@ class Lossless:
 class SampledRangeCFR(IterativeSolver):
 
     def __init__(self, pt: PublicTree, last, abstraction, batch: int, samples: int = 1, seed: int = 0):
-        """pt holds every street but the last (pt.templates and pt.contrib cover all of them);
+        """pt holds every street but the last (pt.classes covers all of them);
         last.street(parents, children, scale) builds any set of last-street deals, and
         last.num_children is how many each deal of the street before has."""
         self.pt, self.last, self.abs = pt, last, abstraction
-        self.T = len(pt.templates)
+        self.cls = one_class(pt)
+        self.T = len(self.cls)
         if pt.num_streets != self.T - 1:
             raise ValueError("pt must hold every street except the last")
         self.batch, self.samples, self.seed = batch, samples, seed
@@ -89,11 +111,12 @@ class SampledRangeCFR(IterativeSolver):
         self.value = [0.0, 0.0]
         H = len(pt.hands)
         self.regret, self.cum = [], []
-        for t, tp in enumerate(pt.templates):
+        for t, lc in enumerate(self.cls):
+            tp = lc.template
             if t < self.T - 1:
-                shape = pt.shape(t)
+                shape = pt.shape(t, 0)
             else:
-                shape = (abstraction.num_rows, len(pt.contrib[t]), abstraction.num_ids)
+                shape = (abstraction.num_rows, lc.num_lines, abstraction.num_ids)
             self.regret.append([np.zeros(shape + (len(a),)) for a in tp.actions])
             self.cum.append([np.zeros(shape + (len(a),)) for a in tp.actions])
         self.sigma = [[_matching(r) for r in row] for row in self.regret]
@@ -118,7 +141,7 @@ class SampledRangeCFR(IterativeSolver):
         streets = list(pt.streets[:-1]) + [pt.streets[-1].subset(S, 1.0 / q1)]
         last = self.last.street(S[positions], children, 1.0 / (q1 * q2))
         last.parent = positions  # index into the sampled deals of the street before
-        view = PublicTree(pt.name, pt.hands, streets + [last], pt.templates, pt.contrib)
+        view = PublicTree(pt.name, pt.hands, streets + [last], pt.classes)
         rows = self.abs.rows(S[positions], children)
         ids = [np.asarray(self.abs.ids(last, S[positions], children, p)) for p in (0, 1)]
         return view, rows, ids
@@ -128,7 +151,7 @@ class SampledRangeCFR(IterativeSolver):
         T = self.T
         out = [list(row) for row in sigma[:T - 2]]
         out.append([s[S] for s in sigma[T - 2]])
-        tp = self.pt.templates[T - 1]
+        tp = self.cls[T - 1].template
         out.append([s[rows[:, None], :, ids[q]].transpose(0, 2, 1, 3) for s, q in zip(sigma[T - 1], tp.players)])
         return out
 
@@ -140,10 +163,11 @@ class SampledRangeCFR(IterativeSolver):
         S, positions, children, q1, q2 = self.sample()
         view, rows, ids = self.view(S, positions, children, q1, q2)
         for p in (0, 1):  # alternating, both on the same sample
-            hsig = self.view_sigma(self.sigma, S, rows, ids)
+            hsig = _classed(self.view_sigma(self.sigma, S, rows, ids))
             reach = forward(view, hsig)
             V, R = backward(view, hsig, reach, p)
-            self.value[p] = float(V[0][0].sum())
+            self.value[p] = float(V[0][0][0].sum())
+            reach, R = _unclassed(reach), _unclassed(R)
             self._apply(p, float(self.t), view, S, rows, ids[p], reach, R)
         self.solve_seconds += time.perf_counter() - start
 
@@ -151,13 +175,14 @@ class SampledRangeCFR(IterativeSolver):
         """Player p's sampled instant regrets in storage layout (zero where not sampled), under
         the current strategies: for testing that their expectation is the full-width regret."""
         view, rows, ids = self.view(S, positions, children, q1, q2)
-        hsig = self.view_sigma(self.sigma, S, rows, ids)
+        hsig = _classed(self.view_sigma(self.sigma, S, rows, ids))
         reach = forward(view, hsig)
         _, R = backward(view, hsig, reach, p)
+        R = _unclassed(R)
         out = [[np.zeros_like(r) for r in row] for row in self.regret]
         T = self.T
-        for t, tp in enumerate(self.pt.templates):
-            for k, q in enumerate(tp.players):
+        for t, lc in enumerate(self.cls):
+            for k, q in enumerate(lc.template.players):
                 if q != p:
                     continue
                 if t < T - 2:
@@ -182,7 +207,8 @@ class SampledRangeCFR(IterativeSolver):
 
     def _apply(self, p, w, view, S, rows, ids, reach, R) -> None:
         T = self.T
-        for t, tp in enumerate(self.pt.templates):
+        for t, lc in enumerate(self.cls):
+            tp = lc.template
             for k, q in enumerate(tp.players):
                 if q != p:
                     continue
@@ -288,18 +314,25 @@ _JOBS = ((0, "br"), (1, "br"), (0, "cfr"))  # player 0's and player 1's best res
 
 
 class StoredStrategy:
-    """The default river provider: the stored last-street strategy sigma_last[k] (rows, L, ids,
-    A), looked up through the abstraction's rows and ids. provider(st, parents, children) gives
-    the per-hand strategy hsig[k] (n, L, H, A) at every node of the last street's template for
-    the last-street deals (parents[i], children[i]), whose CardStreet is st."""
+    """The default river provider: a stored last-street strategy looked up through the
+    abstraction's rows and ids. provider(st, parents, children) -> hsig[c][k], the per-hand
+    strategy (n, L_c, H, A) at node k of each line class c of the last street, for the
+    last-street deals (parents[i], children[i]) whose CardStreet is st. `sigma_last[c][k]` is
+    (rows, L_c, ids, A) and `players[c]` the acting players of class c's template; the sampled
+    solver's one-class storage sigma[-1][k] is StoredStrategy.one_class(...)."""
 
     def __init__(self, abstraction, sigma_last, players):
-        self.abs, self.sigma, self.players = abstraction, sigma_last, list(players)
+        self.abs, self.sigma, self.players = abstraction, sigma_last, [list(p) for p in players]
+
+    @classmethod
+    def one_class(cls, abstraction, sigma_last_k, players_k) -> "StoredStrategy":
+        return cls(abstraction, [sigma_last_k], [players_k])
 
     def __call__(self, st, parents, children) -> list:
         rows = self.abs.rows(parents, children)
         ids = [np.asarray(self.abs.ids(st, parents, children, p)) for p in (0, 1)]
-        return [s[rows[:, None], :, ids[q]].transpose(0, 2, 1, 3) for s, q in zip(self.sigma, self.players)]
+        return [[s[rows[:, None], :, ids[q]].transpose(0, 2, 1, 3) for s, q in zip(sig, players)]
+                for sig, players in zip(self.sigma, self.players)]
 
 
 def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 256, progress=None,
@@ -331,8 +364,9 @@ def split_chunks(num_parents: int, num_children: int, chunk: int, shards: int) -
 
 def zero_sums(pt: PublicTree) -> list:
     """Empty last-street sums, one per job, each (D1, L, closes, H)."""
-    T = len(pt.templates)
-    shape = pt.shape(T - 2) + (pt.templates[T - 2].num_closes,)
+    cls = one_class(pt)
+    T = len(cls)
+    shape = pt.shape(T - 2, 0) + (cls[T - 2].template.num_closes,)
     return [np.moveaxis(np.zeros(shape), 3, 2) for _ in _JOBS]
 
 
@@ -343,20 +377,22 @@ def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256,
     zero_sums). `chunks`, a range of chunk numbers (default every chunk), streams only
     those: one shard of a split evaluation.
 
-    provider(st, parents, children) -> hsig, a list over the last template's nodes of
-    (n, L, H, A) per-hand strategies for the chunk's deals. The default is
-    StoredStrategy(abstraction, sigma[-1], players), today's lookup; a re-solving provider
-    (core/solvers/resolve.Resolver) re-solves each deal of the street before once and serves
-    all of its children. Chunks are streamed in order, so a deal's children arrive together
-    (split_chunks starts every shard on a new deal)."""
-    T = len(pt.templates)
+    provider(st, parents, children) -> hsig[c][k], per line class c of the last street and node
+    k of its template, (n, L_c, H, A) per-hand strategies for the chunk's deals. The default is
+    StoredStrategy.one_class(abstraction, sigma[-1], players), today's lookup; a re-solving
+    provider (core/solvers/resolve.Resolver) re-solves each deal of the street before once and
+    serves all of its children. Chunks are streamed in order, so a deal's children arrive
+    together (split_chunks starts every shard on a new deal). This evaluator itself still needs
+    one class per street (one_class)."""
+    cls = one_class(pt)
+    T = len(cls)
     D1 = pt.streets[-1].num_deals
     hsig_upper = [list(row) for row in sigma[:T - 1]]
-    reach = forward(pt, hsig_upper)
-    _, closing = street_reach(pt.templates[T - 2], hsig_upper[T - 2], reach[T - 2][0])
-    tp_last = pt.templates[T - 1]
+    reach = _unclassed(forward(pt, _classed(hsig_upper)))
+    _, closing = class_reach(cls[T - 2].template, hsig_upper[T - 2], reach[T - 2][0])
+    tp_last = cls[T - 1].template
     if provider is None:
-        provider = StoredStrategy(abstraction, sigma[T - 1], tp_last.players)
+        provider = StoredStrategy.one_class(abstraction, sigma[T - 1], tp_last.players)
     agg = zero_sums(pt)
     total = D1 * last.num_children
     if chunks is None:
@@ -365,12 +401,12 @@ def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256,
         flat = np.arange(c * chunk, min(total, (c + 1) * chunk))
         parents, children = np.divmod(flat, last.num_children)
         st = last.street(parents, children)
-        root = next_root(closing, st.parent)
-        hsig = provider(st, parents, children)
-        nodes, _ = street_reach(tp_last, hsig, root)
+        root = next_root([closing], cls[T - 2:T - 1], cls[T - 1:], st.parent)[0]
+        (hsig,) = provider(st, parents, children)
+        nodes, _ = class_reach(tp_last, hsig, root)
         for j, (p, mode) in enumerate(_JOBS):
-            V, _ = street_values(tp_last, st, pt.contrib[T - 1], hsig, nodes, p, mode, True)
-            agg[j] += close_values(V[0], st.parent, D1, pt.templates[T - 2].num_closes)
+            V, _ = class_values(tp_last, st, cls[T - 1].contrib, hsig, nodes, p, mode, True)
+            agg[j] += close_values([V[0]], cls[T - 2:T - 1], cls[T - 1:], st.parent, D1)[0]
         if progress is not None and (done % progress_every == 0 or done == len(chunks)):
             progress(done, len(chunks))
     return agg
@@ -379,18 +415,19 @@ def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256,
 def finish_exploitability(pt: PublicTree, sigma, sums) -> dict:
     """exact_exploitability's result from the last street's sums (last_street_sums, or the
     shards' sums added into zero_sums): the streets above, bottom-up."""
-    T = len(pt.templates)
+    cls = one_class(pt)
+    T = len(cls)
     hsig_upper = [list(row) for row in sigma[:T - 1]]
-    reach = forward(pt, hsig_upper)
+    reach = _unclassed(forward(pt, _classed(hsig_upper)))
     out = []
     for j, (p, mode) in enumerate(_JOBS):
         a = sums[j]
         for t in range(T - 2, -1, -1):
-            V, _ = street_values(pt.templates[t], pt.streets[t], pt.contrib[t], hsig_upper[t], reach[t], p, mode,
-                                 False, a)
+            V, _ = class_values(cls[t].template, pt.streets[t], cls[t].contrib, hsig_upper[t], reach[t], p, mode,
+                                False, a)
             if t > 0:
-                a = close_values(V[0], pt.streets[t].parent, pt.streets[t - 1].num_deals,
-                                 pt.templates[t - 1].num_closes)
+                a = close_values([V[0]], cls[t - 1:t], cls[t:t + 1], pt.streets[t].parent,
+                                 pt.streets[t - 1].num_deals)[0]
         out.append(float(V[0].sum()))
     br0, br1, value = out
     return {"exploitability": (br0 + br1) / 2, "br_value_p0": br0, "br_value_p1": br1, "game_value": value}

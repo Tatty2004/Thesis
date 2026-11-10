@@ -49,7 +49,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from bombpot.core.solvers.range_cfr import VARIANTS, _segment_sum, _update, street_reach, street_values
+from bombpot.core.solvers.range_cfr import (VARIANTS, _segment_sum, _update, class_reach, class_values, forward,
+                                            next_root, street_reach)
 
 F, T = 0, 1  # the gadget's actions
 
@@ -71,6 +72,16 @@ class Subgame:
     opponent_cfv: np.ndarray | None = None  # (L, H): the T values the gadget used
     player: int | None = None               # the re-solving player (None for a plain solve)
     history: list = field(default_factory=list)  # (iteration, exploitability) at each check
+
+
+def restrict_lines(template, lines):
+    """A class's template restricted to some of its lines (its chips are (L_c,) arrays): for
+    re-solving part of a class."""
+    from bombpot.core.public import Template
+    children = [[(c[0], c[1], np.asarray(c[2])[lines]) if c[0] == "fold" else c for c in row]
+                for row in template.children]
+    closes = [(h, np.asarray(x)[lines]) for h, x in template.closes]
+    return Template(template.players, template.actions, template.hist, children, closes)
 
 
 def _as_groups(r, G: int, L: int | None = None) -> np.ndarray:
@@ -104,8 +115,8 @@ def root_values(street, template, contrib, hsig, root, player: int, mode: str = 
                 num_groups: int = 1) -> np.ndarray:
     """Player `player`'s root value per (line, hand): street_values at the root node, summed
     over each subgame's deals in deal order. (L, H) without `group`; with it, (G, L, H)."""
-    nodes, _ = street_reach(template, hsig, root)
-    V, _ = street_values(template, street, contrib, hsig, nodes, player, mode, True)
+    nodes, _ = class_reach(template, hsig, root)
+    V, _ = class_values(template, street, contrib, hsig, nodes, player, mode, True)
     if group is None:
         return _group_sum(V[0], np.zeros(len(V[0]), dtype=np.int64), 1)[0]
     return _group_sum(V[0], group, num_groups)
@@ -231,8 +242,8 @@ def _solve(street, template, contrib, group, G: int, rp_root, ro_root, p: int, c
         regret, cum, sigma = S["regret"], S["cum"], S["sigma"]
         for q in (0, 1):
             root = roots(S["g_sig"][..., F] if gadget else None)
-            nodes, _ = street_reach(tp, sigma, root)
-            V, R = street_values(tp, S["street"], contrib, sigma, nodes, q, "cfr", True)
+            nodes, _ = class_reach(tp, sigma, root)
+            V, R = class_values(tp, S["street"], contrib, sigma, nodes, q, "cfr", True)
             for k, owner in enumerate(tp.players):
                 if owner != q:
                     continue
@@ -334,21 +345,24 @@ def resolve(street, template, contrib, reach_resolver, reach_opponent, opponent_
 
 
 class Resolver:
-    """provider(st, parents, children) -> hsig that re-solves the last street. For each deal d
-    of the street before (each turn deal), the first time any of its children is asked for, it
-    builds the subgame of all d's children, takes both players' root reaches from the
-    blueprint's upper streets, computes the T values from the blueprint's last street
-    (`blueprint`, a provider such as sampled_cfr.StoredStrategy) with blueprint_cfv, and
-    re-solves once for each player in `players` (safe or unsafe); node k of the last template
-    then plays the re-solve of its acting player (the blueprint for a player not in
-    `players`). Deals are re-solved `batch` at a time (blocks d // batch), each subgame on its
-    own terms (resolve_batch), so the result doesn't depend on the batch or on how chunks fall;
-    the last `keep` blocks are cached, so one re-solve serves every child of d. With `deals`
-    (a collection of deals of the street before) only those are re-solved, and every other
-    deal plays the blueprint.
-    `diagnostics[(d, p)]` records each re-solve:
-      gap, mass         (L,) NashConv of the game solved and its normalizing mass (solver units)
-      br, violation     (L, H) o's best-response root value, and it minus opponent_cfv
+    """provider(st, parents, children) -> hsig[c][k] that re-solves the last street, per line
+    class c of it. For each deal d of the street before (each turn deal), the first time any of
+    its children is asked for, it builds the subgame of all d's children, takes both players'
+    root reaches from the blueprint's upper streets (next_root, per class), computes the T
+    values from the blueprint's last street (`blueprint`, a provider such as
+    sampled_cfr.StoredStrategy) with blueprint_cfv, and re-solves each class once for each
+    player in `players` (safe or unsafe); node k of a class's template then plays the re-solve
+    of its acting player (the blueprint for a player not in `players`). Deals are re-solved
+    `batch` at a time (blocks d // batch), each subgame on its own terms (resolve_batch), so
+    the result doesn't depend on the batch or on how chunks fall; the last `keep` blocks are
+    cached, so one re-solve serves every child of d. With `deals` (a collection of deals of the
+    street before) only those are re-solved, and every other deal plays the blueprint.
+
+    `pt` holds every street but the last (pt.classes covers all of them, as for the sampled
+    solver), `sigma` the blueprint's upper streets as sigma[t][c][k] (the sampled solver's
+    one-class sigma[t][k] is accepted too). `diagnostics[(d, c, p)]` records each re-solve:
+      gap, mass         (L_c,) NashConv of the game solved and its normalizing mass (solver units)
+      br, violation     (L_c, H) o's best-response root value, and it minus opponent_cfv
       iterations, exploitability (max over lines of gap / mass, chips),
       seconds           the block's solve time divided by the deals in it
     """
@@ -356,28 +370,33 @@ class Resolver:
     def __init__(self, pt, last, sigma, blueprint, safe: bool = True, variant: str = "cfr+", iters: int = 1000,
                  tol: float = 0.0, check_every: int = 10, players=(0, 1), batch: int = 1, keep: int = 2,
                  deals=None):
-        from bombpot.core.solvers.range_cfr import forward
-        T = len(pt.templates)
+        T = len(pt.classes)
+        if pt.num_streets != T - 1:
+            raise ValueError("pt must hold every street except the last")
         self.pt, self.last, self.blueprint = pt, last, blueprint
-        self.tp, self.contrib = pt.templates[T - 1], pt.contrib[T - 1]
+        self.classes = pt.classes[T - 1]
         self.safe, self.variant, self.iters, self.tol, self.check_every = safe, variant, iters, tol, check_every
         self.players, self.batch, self.keep = tuple(players), batch, keep
         self.num_parents = pt.streets[-1].num_deals
         self.deals = None if deals is None else {int(d) for d in deals}
-        hsig_upper = [list(row) for row in sigma[:T - 1]]
-        reach = forward(pt, hsig_upper)
-        _, self.closing = street_reach(pt.templates[T - 2], hsig_upper[T - 2], reach[T - 2][0])
+        upper = [list(row) for row in sigma[:T - 1]]
+        if upper and upper[0] and isinstance(upper[0][0], np.ndarray):  # one-class storage [t][k]
+            upper = [[row] for row in upper]
+        reach = forward(pt, upper)
+        roots = [r[0] for r in reach[T - 2]]  # entry 0 of each class: its root
+        _, self.closing = street_reach(pt.classes[T - 2], upper[T - 2], roots)
         self.cache: dict = {}
         self.diagnostics: dict = {}
 
-    def root(self, d: int) -> tuple:
-        """Both players' reach at deal d's last-street root, (L, H) each, laid out as next_root does."""
-        H = self.closing[0][0].shape[-1]
-        return tuple(np.stack([c[p][d] for c in self.closing], axis=1).reshape(-1, H) for p in (0, 1))
+    def root(self, d: int) -> list:
+        """Both players' reach at deal d's last-street roots: [c] (reach0, reach1), (L_c, H) each."""
+        T = len(self.pt.classes)
+        out = next_root(self.closing, self.pt.classes[T - 2], self.classes, np.array([d], dtype=np.int64))
+        return [(r0[0], r1[0]) for r0, r1 in out]
 
     def solve(self, deals) -> list:
-        """Re-solve the subgames of `deals` (deals of the street before): hsig[k] shaped
-        (len(deals) x children, L, H, A), deal by deal."""
+        """Re-solve the subgames of `deals` (deals of the street before): hsig[c][k] shaped
+        (len(deals) x children, L_c, H, A), deal by deal."""
         deals = np.asarray(deals, dtype=np.int64)
         G, n = len(deals), self.last.num_children
         parents, children = np.repeat(deals, n), np.tile(np.arange(n), G)
@@ -385,21 +404,25 @@ class Resolver:
         st = self.last.street(parents, children)
         bp = self.blueprint(st, parents, children)
         roots = [self.root(int(d)) for d in deals]
-        r = tuple(np.stack([x[p] for x in roots]) for p in (0, 1))  # (G, L, H)
-        out = [np.ascontiguousarray(s) for s in bp]
-        for p in self.players:
-            o = 1 - p
-            cfv = blueprint_cfv(st, self.tp, self.contrib, bp, r[0], r[1], o, "br", group, G)
-            res = resolve_batch(st, self.tp, self.contrib, group, G, r[p], r[o], cfv, p, self.variant, self.iters,
-                                self.tol, self.safe, self.check_every)
-            for k, q in enumerate(self.tp.players):
-                if q == p:
-                    out[k] = res.strategy[k]
-            for g, d in enumerate(deals):
-                self.diagnostics[(int(d), p)] = {
-                    "gap": res.gap[g], "mass": res.mass[g], "violation": res.br_cfv[o][g] - cfv[g], "br": res.br_cfv[o][g],
-                    "iterations": int(res.iterations[g]), "exploitability": float(res.exploitability[g]),
-                    "seconds": res.seconds / G}
+        out = []
+        for c, lc in enumerate(self.classes):
+            tp, contrib = lc.template, lc.contrib
+            r = tuple(np.stack([x[c][p] for x in roots]) for p in (0, 1))  # (G, L_c, H)
+            hs = [np.ascontiguousarray(s) for s in bp[c]]
+            for p in self.players:
+                o = 1 - p
+                cfv = blueprint_cfv(st, tp, contrib, bp[c], r[0], r[1], o, "br", group, G)
+                res = resolve_batch(st, tp, contrib, group, G, r[p], r[o], cfv, p, self.variant, self.iters,
+                                    self.tol, self.safe, self.check_every)
+                for k, q in enumerate(tp.players):
+                    if q == p:
+                        hs[k] = res.strategy[k]
+                for g, d in enumerate(deals):
+                    self.diagnostics[(int(d), c, p)] = {
+                        "gap": res.gap[g], "mass": res.mass[g], "violation": res.br_cfv[o][g] - cfv[g],
+                        "br": res.br_cfv[o][g], "iterations": int(res.iterations[g]),
+                        "exploitability": float(res.exploitability[g]), "seconds": res.seconds / G}
+            out.append(hs)
         return out
 
     def _block(self, b: int) -> list:
@@ -415,23 +438,22 @@ class Resolver:
     def __call__(self, st, parents, children) -> list:
         parents, children = np.asarray(parents), np.asarray(children)
         n = self.last.num_children
-        out = None
-        out = [np.empty((len(parents), len(self.contrib), len(self.pt.hands), len(a))) for a in self.tp.actions]
+        H = len(self.pt.hands)
+        out = [[np.empty((len(parents), lc.num_lines, H, len(a))) for a in lc.template.actions] for lc in self.classes]
         for d in np.unique(parents):
             d = int(d)
             mask = parents == d
             if self.deals is not None and d not in self.deals:
                 idx = np.flatnonzero(mask)
                 hs = self.blueprint(st.subset(idx), parents[idx], children[idx])
-                for k, s in enumerate(hs):
-                    out[k][mask] = s
-                continue
-            b = d // self.batch
-            hs = self._block(b)
-            start = np.arange(b * self.batch, d)
-            if self.deals is not None:
-                start = [x for x in start if int(x) in self.deals]
-            rows = len(start) * n + children[mask]
-            for k, s in enumerate(hs):
-                out[k][mask] = s[rows]
+            else:
+                b = d // self.batch
+                start = np.arange(b * self.batch, d)
+                if self.deals is not None:
+                    start = [x for x in start if int(x) in self.deals]
+                rows = len(start) * n + children[mask]
+                hs = [[s[rows] for s in row] for row in self._block(b)]
+            for c, row in enumerate(hs):
+                for k, s in enumerate(row):
+                    out[c][k][mask] = s
         return out

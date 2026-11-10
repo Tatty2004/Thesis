@@ -26,13 +26,14 @@ def main(name, mode, tol=1e-4, iters=3000, variant="cfr+"):
     river = HoldemRiver(GAME, upper)
     D1 = upper.streets[-1].num_deals
     sigma, info = load_range_strategy(OUT / f"{name}.npz")
+    sigma = [row[0] for row in sigma]  # one line class per street: [t][k]
     if name == "kmeans_2d":
         a = EquityBuckets.load(OUT / "kmeans_2d_buckets.npz")
     else:
         a = Lossless(D1, river.num_children, len(upper.hands))  # the full tree's river deals, in order
     before = exact_exploitability(upper, river, a, sigma, chunk=1024)
     print("blueprint", before, flush=True)
-    r = Resolver(upper, river, sigma, StoredStrategy(a, sigma[2], upper.templates[2].players), safe=mode == "safe",
+    r = Resolver(upper, river, sigma, StoredStrategy.one_class(a, sigma[2], upper.classes[2][0].template.players), safe=mode == "safe",
                  variant=variant, iters=iters, tol=tol, batch=D1)
     start = time.time()
     sums = last_street_sums(upper, river, a, sigma, chunk=1024, provider=r,
@@ -40,8 +41,9 @@ def main(name, mode, tol=1e-4, iters=3000, variant="cfr+"):
     seconds = time.time() - start
     after = finish_exploitability(upper, sigma, sums)
     print("re-solved", after, flush=True)
-    gaps = {p: sum(float(g["gap"].sum()) for (d, q), g in r.diagnostics.items() if q == p) for p in (0, 1)}
-    worst_excess = max(float((np.maximum(g["violation"], 0).sum(-1) - g["gap"]).max()) for g in r.diagnostics.values())
+    gaps = {p: sum(float(g["gap"].sum()) for (d, c, q), g in r.diagnostics.items() if q == p) for p in (0, 1)}
+    worst_excess = max(float(((np.maximum(g["violation"], 0).sum(-1) - g["gap"]) / np.maximum(np.abs(g["br"]).max(), 1e-300)).max())
+                       for g in r.diagnostics.values())  # relative to the root values: rounding is ~1e-16
     norm_violation = max(float((np.maximum(g["violation"], 0).max(-1) / np.where(g["mass"] > 0, g["mass"], 1)).max())
                          for g in r.diagnostics.values())
     raw_violation = max(float(g["violation"].max()) for g in r.diagnostics.values())
@@ -51,7 +53,7 @@ def main(name, mode, tol=1e-4, iters=3000, variant="cfr+"):
            "bound": (gaps[0] + gaps[1]) / 2, "sum_gap": gaps,
            "max_root_exploitability": max(g["exploitability"] for g in r.diagnostics.values()),
            "max_violation_over_mass": norm_violation, "max_violation_raw": raw_violation,
-           "max_excess_over_gap": worst_excess,
+           "max_excess_over_gap_relative": worst_excess,
            "iterations": {"min": min(its), "median": float(np.median(its)), "max": max(its)},
            "seconds_total": seconds, "resolves": len(r.diagnostics),
            "seconds_per_resolve": seconds / len(r.diagnostics)}

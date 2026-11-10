@@ -11,7 +11,7 @@ import time
 
 import numpy as np
 
-from bombpot.core.solvers.resolve import blueprint_cfv, resolve
+from bombpot.core.solvers.resolve import blueprint_cfv, resolve, restrict_lines
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
 
@@ -20,9 +20,10 @@ game = Holdem(flops=("Ah7c2d", "KsKd9h"), board_cards=(3, 1, 1))
 t0 = time.time()
 upper = holdem_public_tree(game, upto=2)
 river = HoldemRiver(game, upper)
-n, H, tp = river.num_children, len(upper.hands), upper.templates[2]
+n, H, lc = river.num_children, len(upper.hands), upper.classes[2][0]
+tp = restrict_lines(lc.template, np.arange(lines))
 st = river.street(np.full(n, 0), np.arange(n))
-contrib = upper.contrib[2][:lines]
+contrib = lc.contrib[:lines]
 rng = np.random.default_rng(0)
 r0, r1 = rng.uniform(0.5, 1.0, (lines, H)), rng.uniform(0.5, 1.0, (lines, H))
 bp = [np.full((n, lines, H, len(a)), 1.0 / len(a)) for a in tp.actions]
