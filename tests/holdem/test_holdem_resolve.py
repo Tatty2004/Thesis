@@ -152,15 +152,18 @@ def test_a_batch_equals_each_subgame_alone(setup, safe):
     deals = [3, 10, 40]
     L = len(contrib)
     r0, r1 = rng.random((3, L, H)), rng.random((3, L, H))
+    r0[1] *= rng.random((L, H)) < 0.05  # a sparse range converges at another speed: the batch shrinks
     st = river.street(np.repeat(deals, n), np.tile(np.arange(n), 3))
     group = np.repeat(np.arange(3), n)
     bp = [rng.dirichlet(np.ones(len(a)), size=(3 * n, L, H)) for a in tp.actions]
     cfv = blueprint_cfv(st, tp, contrib, bp, r0, r1, 1, "br", group, 3)
-    batch = resolve_batch(st, tp, contrib, group, 3, r0, r1, cfv, 0, iters=200, tol=2e-3, safe=safe)
+    tol = 2e-3 if safe else 5e-3
+    batch = resolve_batch(st, tp, contrib, group, 3, r0, r1, cfv, 0, iters=200, tol=tol, safe=safe, check_every=5)
+    assert len(set(batch.iterations.tolist())) > 1
     for g, d in enumerate(deals):
         one = river.street(np.full(n, d), np.arange(n))
         cf1 = blueprint_cfv(one, tp, contrib, [x[g * n:(g + 1) * n] for x in bp], r0[g], r1[g], 1, "br")
-        alone = resolve(one, tp, contrib, r0[g], r1[g], cf1, 0, iters=200, tol=2e-3, safe=safe)
+        alone = resolve(one, tp, contrib, r0[g], r1[g], cf1, 0, iters=200, tol=tol, safe=safe, check_every=5)
         assert np.array_equal(cf1, cfv[g])
         assert alone.iterations == batch.iterations[g] and np.array_equal(alone.gap, batch.gap[g])
         assert all(np.array_equal(x, y[g * n:(g + 1) * n]) for x, y in zip(alone.strategy, batch.strategy))

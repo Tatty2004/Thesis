@@ -141,76 +141,98 @@ def _solve(street, template, contrib, group, G: int, rp_root, ro_root, p: int, c
     group = np.ascontiguousarray(group, dtype=np.int64)
     rp_root = _as_groups(rp_root, G)
     _, L, H = rp_root.shape
-    rp = np.ascontiguousarray(rp_root[group])
     gadget = cfv is not None
     if gadget:
         cfv = _as_groups(cfv, G)
-        g_regret = np.zeros((G, L, H, 2))
-        g_cum = np.zeros((G, L, H, 2))
-        g_sig = np.full((G, L, H, 2), 0.5)
     else:
         ro_root = _as_groups(ro_root, G)
-        ro = np.ascontiguousarray(ro_root[group])
-    regret = [np.zeros((n, L, H, len(a))) for a in tp.actions]
-    cum = [np.zeros_like(r) for r in regret]
-    sigma = [_matching(r) for r in regret]
+    rp = np.ascontiguousarray(rp_root[group])
     mass = _group_sum(street.fold(rp, o), group, G)  # (G, L, H): o's hands, chance x p's reach
     mass = (mass if gadget else mass * ro_root).sum(-1)
     v = VARIANTS[variant]
     history = [[] for _ in range(G)]
-    t = 0
+
+    # The state of the subgames still running ("active"): they are compacted away as they stop
+    # (when the street can be subset), which changes no arithmetic of the others.
+    S = {"gid": np.arange(G), "deal": np.arange(n), "group": group, "street": street, "rp_root": rp_root,
+         "rp": rp, "mass": mass,
+         "regret": [np.zeros((n, L, H, len(a))) for a in tp.actions]}
+    S["cum"] = [np.zeros_like(r) for r in S["regret"]]
+    S["sigma"] = [_matching(r) for r in S["regret"]]
+    if gadget:
+        S.update(cfv=cfv, g_regret=np.zeros((G, L, H, 2)), g_cum=np.zeros((G, L, H, 2)), g_sig=np.full((G, L, H, 2), 0.5))
+    else:
+        S.update(ro_root=ro_root, ro=np.ascontiguousarray(ro_root[group]))
 
     def roots(sig_f):
-        r_o = np.ascontiguousarray(sig_f[group]) if gadget else ro
-        return (rp, r_o) if p == 0 else (r_o, rp)
+        r_o = np.ascontiguousarray(sig_f[S["group"]]) if gadget else S["ro"]
+        return (S["rp"], r_o) if p == 0 else (r_o, S["rp"])
 
     def evaluate():
-        avg = [_average(c) for c in cum]
-        g_avg = _average(g_cum) if gadget else None
+        Ga, grp, st = len(S["gid"]), S["group"], S["street"]
+        avg = [_average(c) for c in S["cum"]]
+        g_avg = _average(S["g_cum"]) if gadget else None
         root = roots(g_avg[..., F] if gadget else None)
-        br_o = root_values(street, tp, contrib, avg, root, o, "br", group, G)
-        br_p = root_values(street, tp, contrib, avg, root, p, "br", group, G)
-        on = [root_values(street, tp, contrib, avg, root, q, "cfr", group, G) for q in (0, 1)]
-        best_p = (rp_root * br_p).sum(-1)  # p's best total: its root reach is fixed
+        br_o = root_values(st, tp, contrib, avg, root, o, "br", grp, Ga)
+        br_p = root_values(st, tp, contrib, avg, root, p, "br", grp, Ga)
+        on = [root_values(st, tp, contrib, avg, root, q, "cfr", grp, Ga) for q in (0, 1)]
+        best_p = (S["rp_root"] * br_p).sum(-1)  # p's best total: its root reach is fixed
         if gadget:
-            best_o = np.maximum(br_o, cfv).sum(-1)
-            best_p = best_p - (g_avg[..., T] * cfv).sum(-1)  # T pays o cfv whatever p does
+            best_o = np.maximum(br_o, S["cfv"]).sum(-1)
+            best_p = best_p - (g_avg[..., T] * S["cfv"]).sum(-1)  # T pays o cfv whatever p does
         else:
-            best_o = (ro_root * br_o).sum(-1)
+            best_o = (S["ro_root"] * br_o).sum(-1)
         gap = best_o + best_p
-        norm = np.divide(gap, mass, out=np.zeros_like(gap), where=mass > 0).max(axis=1)  # (G,)
+        m = S["mass"]
+        norm = np.divide(gap, m, out=np.zeros_like(gap), where=m > 0).max(axis=1)  # (Ga,)
         return avg, g_avg, br_o, br_p, on, gap, norm
 
     # The result, filled in per subgame as each one stops.
-    out_sig = [np.empty_like(c) for c in cum]
+    out_sig = [np.empty_like(c) for c in S["cum"]]
     out_g = np.empty((G, L, H, 2)) if gadget else None
     out_br_o, out_br_p, out_gap = np.empty((G, L, H)), np.empty((G, L, H)), np.empty((G, L))
     out_on = [np.empty((G, L, H)) for _ in (0, 1)]
     out_expl, out_iters = np.empty(G), np.zeros(G, dtype=np.int64)
-    done = np.zeros(G, dtype=bool)
 
-    def freeze(which, result):
+    def freeze(which, result, t):
+        """Store the subgames `which` (a mask over the active ones) as stopped at iteration t."""
         avg, g_avg, br_o, br_p, on, gap, norm = result
-        deals = which[group]
-        for k in range(len(cum)):
-            out_sig[k][deals] = avg[k][deals]
+        ids, deals = S["gid"][which], which[S["group"]]
+        for k in range(len(avg)):
+            out_sig[k][S["deal"][deals]] = avg[k][deals]
         if gadget:
-            out_g[which] = g_avg[which]
-        out_br_o[which], out_br_p[which], out_gap[which] = br_o[which], br_p[which], gap[which]
+            out_g[ids] = g_avg[which]
+        out_br_o[ids], out_br_p[ids], out_gap[ids] = br_o[which], br_p[which], gap[which]
         for q in (0, 1):
-            out_on[q][which] = on[q][which]
-        out_expl[which], out_iters[which] = norm[which], t
-        done[which] = True
+            out_on[q][ids] = on[q][which]
+        out_expl[ids], out_iters[ids] = norm[which], t
 
-    while t < iters and not done.all():
+    def compact(keep):
+        """Keep only the active subgames `keep` (a mask over the active ones)."""
+        deals = np.flatnonzero(keep[S["group"]])
+        remap = np.cumsum(keep) - 1
+        S["street"] = S["street"].subset(deals)
+        S["group"] = np.ascontiguousarray(remap[S["group"][deals]])
+        S["deal"] = S["deal"][deals]
+        S["gid"] = S["gid"][keep]
+        for key in ("rp_root", "mass") + (("cfv", "g_regret", "g_cum", "g_sig") if gadget else ("ro_root",)):
+            S[key] = np.ascontiguousarray(S[key][keep])
+        for key in ("rp",) + (() if gadget else ("ro",)):
+            S[key] = np.ascontiguousarray(S[key][deals])
+        for key in ("regret", "cum", "sigma"):
+            S[key] = [np.ascontiguousarray(x[deals]) for x in S[key]]
+
+    t = 0
+    while t < iters and len(S["gid"]):
         t += 1
         weight = {"cfr": 1.0, "cfr+": float(t), "dcfr": float(t) ** gamma}[variant]
         pos = t ** alpha / (t ** alpha + 1.0)
         neg = t ** beta / (t ** beta + 1.0)
+        regret, cum, sigma = S["regret"], S["cum"], S["sigma"]
         for q in (0, 1):
-            root = roots(g_sig[..., F] if gadget else None)
+            root = roots(S["g_sig"][..., F] if gadget else None)
             nodes, _ = street_reach(tp, sigma, root)
-            V, R = street_values(tp, street, contrib, sigma, nodes, q, "cfr", True)
+            V, R = street_values(tp, S["street"], contrib, sigma, nodes, q, "cfr", True)
             for k, owner in enumerate(tp.players):
                 if owner != q:
                     continue
@@ -220,22 +242,28 @@ def _solve(street, template, contrib, group, G: int, rp_root, ro_root, p: int, c
                 _update(regret[k].size, regret[k].reshape(-1, A), np.ascontiguousarray(R[k]).reshape(-1, A),
                         sigma[k].reshape(-1, A), cum[k].reshape(-1, A), own, weight, pos, neg, v)
             if gadget and q == o:
-                w = _group_sum(V[0], group, G)
-                value = g_sig[..., F] * w + g_sig[..., T] * cfv
-                inst = np.stack([w - value, cfv - value], axis=-1)
-                _update(g_regret.size, g_regret.reshape(-1, 2), np.ascontiguousarray(inst).reshape(-1, 2),
-                        g_sig.reshape(-1, 2), g_cum.reshape(-1, 2), np.ones(G * L * H), weight, pos, neg, v)
+                g_sig, c = S["g_sig"], S["cfv"]
+                w = _group_sum(V[0], S["group"], len(S["gid"]))
+                value = g_sig[..., F] * w + g_sig[..., T] * c
+                inst = np.stack([w - value, c - value], axis=-1)
+                _update(g_sig.size, S["g_regret"].reshape(-1, 2), np.ascontiguousarray(inst).reshape(-1, 2),
+                        g_sig.reshape(-1, 2), S["g_cum"].reshape(-1, 2), np.ones(g_sig.size // 2), weight, pos, neg,
+                        v)
         if t % check_every == 0 or t == iters:
             result = evaluate()
-            for g in np.flatnonzero(~done):
-                history[g].append((t, float(result[-1][g])))
-            stop = ~done & (result[-1] <= tol)
-            if t == iters:
-                stop = ~done
+            for g, x in zip(S["gid"], result[-1]):
+                history[g].append((t, float(x)))
+            stop = (result[-1] <= tol) | (t == iters)
             if stop.any():
-                freeze(stop, result)
-    if not done.all():  # iters == 0
-        freeze(~done, evaluate())
+                freeze(stop, result, t)
+                if stop.all():
+                    S["gid"] = S["gid"][:0]
+                elif hasattr(S["street"], "subset"):
+                    compact(~stop)
+                else:  # a street without subset() (e.g. a DenseStreet) can only be solved one subgame at a time
+                    raise NotImplementedError("batched solves need a street with subset()")
+    if len(S["gid"]):  # iters == 0
+        freeze(np.ones(len(S["gid"]), dtype=bool), evaluate(), t)
     seconds = time.perf_counter() - start
     br = (out_br_p, out_br_o) if p == 0 else (out_br_o, out_br_p)
     return Subgame(out_sig, tuple(out_on), br, out_gap, mass, out_expl, out_iters, seconds, out_g,
