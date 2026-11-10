@@ -225,12 +225,7 @@ class ExactRiverLeaf:
         betting = sum(lc.template.num_nodes > 0 for lc in self.classes)
         tol = None if self.tol is None else (self.tol / max(betting, 1) if self.criterion == "total" else self.tol)
         subs = []
-        for lc in self.classes:
-            roots = [np.empty((len(closing[0][q]), lc.num_lines, closing[0][q].shape[-1])) for q in (0, 1)]
-            for q in (0, 1):
-                for pc in np.unique(lc.parent_class):
-                    m = np.flatnonzero(lc.parent_class == pc)
-                    roots[q][:, m] = closing[pc][q][:, lc.parent_line[m], lc.parent_close[m]]
+        for lc, roots in zip(self.classes, self.roots(closing)):
             subs.append(solve_subgames(self.street, lc.template, lc.contrib, roots[0], roots[1], self.group,
                                        self.variant, self.iters, tol, self.check_every, lc.stack,
                                        criterion=self.criterion))
@@ -240,6 +235,19 @@ class ExactRiverLeaf:
                            "seconds": sum(s.seconds for s in subs)})
         self._memo = (tuple(tuple(np.array(r) for r in c) for c in closing), subs)
         return subs
+
+    def roots(self, closing) -> list:
+        """The last street's root reach per class, [c] (reach0, reach1) each (D, L_c, H): each
+        line takes the closing reach of the line and close it continues."""
+        out = []
+        for lc in self.classes:
+            roots = [np.empty((len(closing[0][q]), lc.num_lines, closing[0][q].shape[-1])) for q in (0, 1)]
+            for q in (0, 1):
+                for pc in np.unique(lc.parent_class):
+                    m = np.flatnonzero(lc.parent_class == pc)
+                    roots[q][:, m] = closing[pc][q][:, lc.parent_line[m], lc.parent_close[m]]
+            out.append(tuple(roots))
+        return out
 
     def strategy(self, closing) -> list:
         """The last street's average strategy per class, [c][k] (D, L_c, H, A): every subgame's,

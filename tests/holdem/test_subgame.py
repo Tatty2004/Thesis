@@ -27,6 +27,58 @@ def setup():
     return upper, river
 
 
+POT = Holdem(num_ranks=5, num_suits=3, board_cards=(3, 1, 1), flops=("2c3c4d", "5c6d4c"), betting="pot", stack=20,
+             sizes=(0.5, 1), max_aggressive=2)
+
+
+@pytest.fixture(scope="module")
+def pot_setup():
+    upper = holdem_public_tree(POT, upto=2)
+    return upper, HoldemRiver(POT, upper)
+
+
+@pytest.mark.parametrize("c, line", [(0, 0), (3, 5)])
+def test_no_limit_subgame_matches_range_cfr_on_the_dense_game(pot_setup, c, line):
+    # A no-limit river line (14 and 10 nodes, all-in children): lockstep regrets and values.
+    upper, river = pot_setup
+    lc = upper.classes[2][c]
+    template, contrib = line_template(lc.template, line), lc.contrib[line]
+    st = river.street(*river.all_children([7]))
+    r = ranges(len(upper.hands), 11 + c)
+    a = SubgameCFR(st, template, [contrib], (r[0], r[1]))
+    b = RangeCFR(dense_tree(st, template, contrib, r[0], r[1]), "cfr+")
+    for it in range(15):
+        for p in (0, 1):
+            b.sigma = [[[x.copy() for x in a.sigma[0][0]]]]
+            _, ra = a.instant_regrets(p)
+            _, rb = b.instant_regrets(p)
+            for k, q in enumerate(template.players):
+                if q == p:
+                    want = ra[0][0][k] * r[p][None, None, :, None]
+                    np.testing.assert_allclose(rb[0][0][k], want, rtol=0, atol=1e-13 * max(1.0, np.abs(want).max()))
+        a.iteration()
+    ev = a.evaluate()
+    hsig = b.hand_sigma(a.average_strategy())
+    reach = b.reach(hsig)
+    for p in (0, 1):
+        for mode, key in (("cfr", "values"), ("br", "br_values")):
+            vb = b.values(p, hsig, reach, mode)[0][0][0][0].sum(0)[0]
+            np.testing.assert_allclose(vb, ev[key][p][0, 0] * r[p], rtol=1e-12, atol=1e-18)
+
+
+def test_all_in_subgame_is_a_showdown(pot_setup):
+    upper, river = pot_setup
+    lc = [x for x in upper.classes[2] if x.template.num_nodes == 0][0]
+    st = river.street(*river.all_children([3]))
+    r = ranges(len(upper.hands), 2)
+    sub = solve_subgame(st, line_template(lc.template, 0), lc.contrib[0], r[0], r[1], tol=1e-3)
+    assert sub.iterations == 0 and abs(sub.exploitability) < 1e-12  # zero up to rounding
+    D, H = st.num_deals, len(upper.hands)
+    ro = np.broadcast_to(r[1], (D, 1, H)).copy()
+    want = (lc.contrib[0] * (2 * st.share(ro, 0) - st.fold(ro, 0)))[:, 0].sum(0)
+    np.testing.assert_allclose(sub.values[0], want, rtol=1e-12, atol=1e-18)
+
+
 def river_line(upper, line):
     """The river's (one-line template, chips in) for line `line` of the limit game's one class."""
     (lc,) = upper.classes[2]
