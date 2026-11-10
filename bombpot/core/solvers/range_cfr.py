@@ -196,16 +196,27 @@ def next_root(closing, parent: np.ndarray) -> tuple:
     return tuple(out)
 
 
-def forward(pt: PublicTree, hsig) -> list:
-    """Both players' reach at every decision node: reach[t][k] = (reach0, reach1)."""
+def stack_closing(closing) -> tuple:
+    """street_reach's closing reach (one (reach0, reach1) per close, each (D, L, H)) as one pair
+    of arrays shaped (D, L, closes, H)."""
+    return tuple(np.stack([c[p] for c in closing], axis=2) for p in (0, 1))
+
+
+def forward(pt: PublicTree, hsig, closing: bool = False):
+    """Both players' reach at every decision node: reach[t][k] = (reach0, reach1).
+
+    With closing=True, returns (reach, closing reach of the tree's last street), the latter as
+    stack_closing gives it: the ranges a leaf provider (backward's `leaf`) sees."""
     D0, _, H = pt.shape(0)
     root = (np.ones((D0, 1, H)), np.ones((D0, 1, H)))
     out = []
     for t, tp in enumerate(pt.templates[:pt.num_streets]):
-        nodes, closing = street_reach(tp, hsig[t], root)
+        nodes, close = street_reach(tp, hsig[t], root)
         out.append(nodes)
         if t + 1 < pt.num_streets:
-            root = next_root(closing, pt.streets[t + 1].parent)
+            root = next_root(close, pt.streets[t + 1].parent)
+    if closing:
+        return out, stack_closing(close)
     return out
 
 
@@ -254,18 +265,31 @@ def street_values(tp, st, contrib, hsig_t, reach_t, p: int, mode: str, last: boo
     return V, R
 
 
-def backward(pt: PublicTree, hsig, reach, p: int, mode: str = "cfr"):
+def backward(pt: PublicTree, hsig, reach, p: int, mode: str = "cfr", leaf=None):
     """Player p's counterfactual value of each hand at every decision node, bottom-up.
 
     mode "cfr": p plays hsig; returns (values, regrets at p's nodes).
     mode "br":  p best-responds; returns (values, None for every node).
+
+    leaf: a value provider for the lines that close the tree's last street (the tree then
+    stops there, e.g. at the end of the turn). leaf.values(p, t, closing) gets that street's
+    closing reach (reach0, reach1), each (D, L, closes, H), and returns player p's value per
+    hand in the solver's units, (D, L, closes, H): what close_values would give from the
+    streets below. In mode "br" the provider still returns its own values (a value function,
+    not a strategy).
     """
     T = pt.num_streets
     all_values, all_regrets = [None] * T, [None] * T
     agg = None
     for t in range(T - 1, -1, -1):
         tp, st = pt.templates[t], pt.streets[t]
-        V, R = street_values(tp, st, pt.contrib[t], hsig[t], reach[t], p, mode, t == len(pt.templates) - 1, agg)
+        if leaf is not None and t == T - 1:
+            _, close = street_reach(tp, hsig[t], reach[t][0])
+            agg = leaf.values(p, t, stack_closing(close))
+            last = False
+        else:
+            last = leaf is None and t == len(pt.templates) - 1
+        V, R = street_values(tp, st, pt.contrib[t], hsig[t], reach[t], p, mode, last, agg)
         all_values[t], all_regrets[t] = V, R
         if t > 0:
             agg = close_values(V[0], st.parent, pt.streets[t - 1].num_deals, pt.templates[t - 1].num_closes)
@@ -275,9 +299,16 @@ def backward(pt: PublicTree, hsig, reach, p: int, mode: str = "cfr"):
 class RangeCFR(IterativeSolver):
 
     def __init__(self, pt: PublicTree, variant: str = "dcfr", alpha: float = 1.5, beta: float = 0.0,
-                 gamma: float = 2.0, buckets=None):
+                 gamma: float = 2.0, buckets=None, leaf=None):
+        """leaf: a value provider for the lines that close pt's last street (see backward).
+        Then pt holds only the streets above (its templates and contrib may cover more; the
+        extra ones are dropped here)."""
         if variant not in ("cfr", "cfr+", "dcfr"):
             raise ValueError(f"unknown variant {variant!r}")
+        self.leaf = leaf
+        if leaf is not None:
+            T = pt.num_streets
+            pt = PublicTree(pt.name, pt.hands, pt.streets, pt.templates[:T], pt.contrib[:T])
         self.pt, self.variant = pt, variant
         self.alpha, self.beta, self.gamma = alpha, beta, gamma
         self.t = 0
@@ -347,7 +378,7 @@ class RangeCFR(IterativeSolver):
         return forward(self.pt, hsig)
 
     def values(self, p: int, hsig, reach, mode: str = "cfr"):
-        return backward(self.pt, hsig, reach, p, mode)
+        return backward(self.pt, hsig, reach, p, mode, leaf=self.leaf)
 
     # Iterations ---------------------------------------------------------------------
 

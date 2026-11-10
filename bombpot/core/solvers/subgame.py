@@ -88,16 +88,21 @@ class SubgameCFR(RangeCFR):
         return {"values": values, "br_values": br, "exploitability": expl, "exploitability_raw": raw,
                 "mass": mass}
 
-    def solve(self, iters: int, tol: float | None = None, check_every: int = 10) -> dict:
-        """Iterate until every subgame's exploitability (chips) is <= tol, checked every
-        `check_every` iterations, or until `iters` iterations. Returns evaluate() of the final
-        average strategy."""
+    def solve(self, iters: int, tol: float | None = None, check_every: int = 10, criterion: str = "max") -> dict:
+        """Iterate until the error is <= tol, checked every `check_every` iterations, or until
+        `iters` iterations. criterion "max": every subgame's exploitability (chips per unit of
+        its reach mass); "total": the sum of the subgames' exploitability_raw (solver units:
+        with the game's own chance weights, the batch's share of the whole game's error in
+        chips). Returns evaluate() of the final average strategy."""
+        if criterion not in ("max", "total"):
+            raise ValueError(f"unknown criterion {criterion!r}")
         ev, at = None, -1
         while self.t < iters:
             self.iteration()
             if tol is not None and (self.t % check_every == 0 or self.t == iters):
                 ev, at = self.evaluate(), self.t
-                if ev["exploitability"].max() <= tol:
+                err = ev["exploitability"].max() if criterion == "max" else ev["exploitability_raw"].sum()
+                if err <= tol:
                     break
         return ev if at == self.t else self.evaluate()
 
@@ -117,16 +122,17 @@ class Subgame:
 
 
 def solve_subgames(street, template, contrib, reach0, reach1, group=None, variant: str = "cfr+", iters: int = 1000,
-                   tol: float | None = None, check_every: int = 10, stack=None, keep_solver: bool = False) -> Subgame:
+                   tol: float | None = None, check_every: int = 10, stack=None, keep_solver: bool = False,
+                   criterion: str = "max") -> Subgame:
     """Solve a batch of subgames sharing one template: reach0/reach1 (G, L, H), contrib (L,),
     group (D,) the subgame root of each deal. values (G, L, H); strategy[k] (D, L, H, A);
-    exploitability (G, L). `stack` (chips behind) is accepted for the no-limit engine and not
-    used yet: the template carries the betting."""
+    exploitability (G, L). `criterion` as in SubgameCFR.solve. `stack` (chips behind) is
+    accepted for the no-limit engine and not used yet: the template carries the betting."""
     import time
 
     start = time.perf_counter()
     s = SubgameCFR(street, template, contrib, (reach0, reach1), group, variant)
-    ev = s.solve(iters, tol, check_every)
+    ev = s.solve(iters, tol, check_every, criterion)
     strategy = s.hand_sigma(s.average_strategy())[0]
     return Subgame(ev["values"], ev["br_values"], strategy, s.t, ev["exploitability"], ev["exploitability_raw"],
                    ev["mass"], time.perf_counter() - start, s if keep_solver else None)
@@ -158,8 +164,11 @@ def solve_subgame(street, template, contrib, reach0, reach1, variant: str = "cfr
 class ExactRiverLeaf:
     """Leaf values at the end of the second-to-last street, from exact last-street subgames:
     every (deal, line, close) at the leaf is solved from the closing ranges (solve_subgames,
-    all at once) to `tol` chips, and its root values are returned (range_cfr.backward's
-    `leaf` interface). For small decks: it holds every last-street deal.
+    all at once) and its root values are returned (range_cfr.backward's `leaf` interface).
+    For small decks: it holds every last-street deal. Tolerance: criterion "total" (default)
+    stops when the subgames' summed exploitability_raw is <= tol, which with the game's chance
+    weights is the leaf's error in chips of the whole game; "max" when every subgame is within
+    tol chips per unit of its own reach mass.
 
     pt             the public tree of the streets above (its last street is where the leaf sits)
     last           a last-street provider: last.street(parents, children) and
@@ -173,9 +182,10 @@ class ExactRiverLeaf:
     `stats` collects each solve's iterations and worst exploitability."""
 
     def __init__(self, pt, last, template_last, contrib_last, tol: float, variant: str = "cfr+",
-                 iters: int = 10_000, check_every: int = 10):
+                 iters: int = 10_000, check_every: int = 10, criterion: str = "total"):
         self.pt, self.template, self.contrib = pt, template_last, np.asarray(contrib_last, dtype=float)
         self.tol, self.variant, self.iters, self.check_every = tol, variant, iters, check_every
+        self.criterion = criterion
         D = pt.streets[-1].num_deals
         self.street = last.street(*last.all_children(np.arange(D)))
         self.group = np.asarray(self.street.parent)
@@ -189,7 +199,7 @@ class ExactRiverLeaf:
             return self._memo[1]
         sub = solve_subgames(self.street, self.template, self.contrib, r0.reshape(D, L * C, H),
                              r1.reshape(D, L * C, H), self.group, self.variant, self.iters, self.tol,
-                             self.check_every)
+                             self.check_every, criterion=self.criterion)
         self.stats.append({"iterations": sub.iterations, "max_exploitability": float(sub.exploitability.max()),
                            "total_exploitability_raw": float(sub.exploitability_raw.sum()),
                            "seconds": sub.seconds})
