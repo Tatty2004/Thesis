@@ -35,7 +35,8 @@ def main(name, mode, tol=1e-4, iters=3000, variant="cfr+"):
     r = Resolver(upper, river, sigma, StoredStrategy(a, sigma[2], upper.templates[2].players), safe=mode == "safe",
                  variant=variant, iters=iters, tol=tol, batch=D1)
     start = time.time()
-    sums = last_street_sums(upper, river, a, sigma, chunk=1024, provider=r)
+    sums = last_street_sums(upper, river, a, sigma, chunk=1024, provider=r,
+                            progress=lambda done, total: print(f"chunk {done}/{total}", time.time() - start, flush=True))
     seconds = time.time() - start
     after = finish_exploitability(upper, sigma, sums)
     print("re-solved", after, flush=True)
