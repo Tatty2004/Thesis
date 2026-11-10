@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from bombpot.core.solvers.range_cfr import RangeCFR, class_reach, forward
+from bombpot.core.solvers.range_cfr import VARIANTS, RangeCFR, _update, class_reach, forward
 from bombpot.core.solvers.subgame import ExactRiverLeaf
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
@@ -53,23 +53,66 @@ class CFRDSolver(RangeCFR):
     exploitability its convergence bound covers; a river re-solved from the trunk average's
     closing ranges is not."""
 
-    def __init__(self, pt, leaf, **kw):
-        super().__init__(pt, "dcfr", leaf=leaf, **kw)
+    def __init__(self, pt, leaf, variant: str = "dcfr", simultaneous: bool = True, **kw):
+        """simultaneous: one leaf solve per iteration, from the current profile, gives both
+        players' regrets and both players' river averages (CFR-D's accounting: each player's
+        regret is measured against the opponent river strategy that enters the average). With
+        alternating updates (False) the two players' passes use different solves."""
+        super().__init__(pt, variant, leaf=leaf, **kw)
+        self.simultaneous = simultaneous
         self.river_cum = [[np.zeros((leaf.street.num_deals, lc.num_lines, len(pt.hands), len(a)))
                            for a in lc.template.actions] for lc in leaf.classes]
 
-    def instant_regrets(self, p: int):
-        reach, regrets = super().instant_regrets(p)
-        closing, subs = self.leaf._memo  # the solve this pass's backward used
-        w = float(self.t) ** self.gamma
+    def _accumulate_river(self, players) -> None:
+        """Add the leaf's latest solve (its memo) to the river average of `players`."""
+        closing, subs = self.leaf._memo
+        w = self.average_weight()
         for lc, sub, roots, cum in zip(self.leaf.classes, subs, self.leaf.roots(closing), self.river_cum):
             if lc.template.num_nodes == 0:
                 continue
             nodes, _ = class_reach(lc.template, sub.strategy, tuple(r[self.leaf.group] for r in roots))
             for k, q in enumerate(lc.template.players):
-                if q == p:
-                    cum[k] += w * nodes[k][p][..., None] * sub.strategy[k]
+                if q in players:
+                    cum[k] += w * nodes[k][q][..., None] * sub.strategy[k]
+
+    def instant_regrets(self, p: int):
+        reach, regrets = super().instant_regrets(p)
+        if not self.simultaneous:
+            self._accumulate_river((p,))  # the solve this pass's backward used
         return reach, regrets
+
+    def iteration(self) -> None:
+        if not self.simultaneous:
+            return super().iteration()
+        start = time.perf_counter()
+        self.t += 1
+        t_ = self.t
+        weight = self.average_weight()
+        pos = t_ ** self.alpha / (t_ ** self.alpha + 1.0)
+        neg = t_ ** self.beta / (t_ ** self.beta + 1.0)
+        hsig = self.hand_sigma()
+        reach = self.reach(hsig)
+        regrets = {}
+        for p in (0, 1):  # both players' values from the same profile: one leaf solve (memo)
+            V, R = self.values(p, hsig, reach)
+            self.value[p] = float(V[0][0][0].sum())
+            regrets[p] = R
+        self._accumulate_river((0, 1))
+        for p in (0, 1):
+            for t, c, k in self._nodes(p):
+                reg = self.regret[t][c][k]
+                A = reg.shape[-1]
+                self.sigma[t][c][k] = np.ascontiguousarray(self.sigma[t][c][k])
+                own = np.ascontiguousarray(self.own_reach(t, c, k, reach)).reshape(-1)
+                _update(reg.size, reg.reshape(-1, A), np.ascontiguousarray(regrets[p][t][c][k]).reshape(-1, A),
+                        self.sigma[t][c][k].reshape(-1, A), self.cum[t][c][k].reshape(-1, A), own, weight, pos, neg,
+                        VARIANTS[self.variant])
+        self.solve_seconds += time.perf_counter() - start
+
+    def average_weight(self) -> float:
+        """Iteration t's weight in the trunk's average (RangeCFR.iteration's `weight`)."""
+        t = float(self.t)
+        return {"cfr": 1.0, "cfr+": t, "dcfr": t ** self.gamma}[self.variant]
 
     def river_average(self) -> list:
         out = []
@@ -91,6 +134,8 @@ def main(argv=None):
     ap.add_argument("--inner", default="cfr+", choices=["cfr+", "dcfr"], help="subgame solver variant")
     ap.add_argument("--check-every", type=int, default=10, help="subgame tolerance checks")
     ap.add_argument("--part", default="both", choices=["both", "lossless", "leaf"])
+    ap.add_argument("--trunk", default="dcfr", choices=["cfr", "cfr+", "dcfr"], help="trunk (and lossless) variant")
+    ap.add_argument("--alternating", action="store_true", help="CFR-D with alternating updates (two solves)")
     ap.add_argument("--game", default="limit", choices=["limit", "pot"])
     ap.add_argument("--stack", type=float, default=20.0, help="chips behind (pot game)")
     ap.add_argument("--out", default="results/valuenet/subgame/gate_c1.json")
@@ -108,7 +153,7 @@ def main(argv=None):
         out.write_text(json.dumps(result, indent=1, default=float))
 
     if a.part in ("both", "lossless"):
-        ref = RangeCFR(full, "dcfr")
+        ref = RangeCFR(full, a.trunk)
         while ref.t < a.iters:
             ref.iteration()
             if ref.t in checks:
@@ -120,7 +165,7 @@ def main(argv=None):
     if a.part == "lossless":
         return
     leaf = ExactRiverLeaf(upper, river, a.leaf_tol, variant=a.inner, iters=a.sub_iters, check_every=a.check_every)
-    solver = CFRDSolver(upper, leaf)
+    solver = CFRDSolver(upper, leaf, a.trunk, simultaneous=not a.alternating)
     while solver.t < a.iters:
         solver.iteration()
         if solver.t in checks:
