@@ -287,13 +287,30 @@ class SampledRangeCFR(IterativeSolver):
 _JOBS = ((0, "br"), (1, "br"), (0, "cfr"))  # player 0's and player 1's best responses, then the value
 
 
+class StoredStrategy:
+    """The default river provider: the stored last-street strategy sigma_last[k] (rows, L, ids,
+    A), looked up through the abstraction's rows and ids. provider(st, parents, children) gives
+    the per-hand strategy hsig[k] (n, L, H, A) at every node of the last street's template for
+    the last-street deals (parents[i], children[i]), whose CardStreet is st."""
+
+    def __init__(self, abstraction, sigma_last, players):
+        self.abs, self.sigma, self.players = abstraction, sigma_last, list(players)
+
+    def __call__(self, st, parents, children) -> list:
+        rows = self.abs.rows(parents, children)
+        ids = [np.asarray(self.abs.ids(st, parents, children, p)) for p in (0, 1)]
+        return [s[rows[:, None], :, ids[q]].transpose(0, 2, 1, 3) for s, q in zip(self.sigma, self.players)]
+
+
 def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 256, progress=None,
-                         progress_every: int = 1) -> dict:
+                         progress_every: int = 1, provider=None) -> dict:
     """Best responses and value of a stored strategy in the full game, every last-street
     deal included, streamed `chunk` deals at a time so memory stays bounded. If given,
     progress(chunks done, total chunks) is called every `progress_every` chunks and after
-    the last, so long evaluations can log an ETA."""
-    sums = last_street_sums(pt, last, abstraction, sigma, chunk, progress=progress, progress_every=progress_every)
+    the last, so long evaluations can log an ETA. `provider` (see last_street_sums) supplies
+    the last street's strategy; by default the stored one, sigma[-1] through `abstraction`."""
+    sums = last_street_sums(pt, last, abstraction, sigma, chunk, progress=progress, progress_every=progress_every,
+                            provider=provider)
     return finish_exploitability(pt, sigma, sums)
 
 
@@ -320,17 +337,26 @@ def zero_sums(pt: PublicTree) -> list:
 
 
 def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256, chunks=None, progress=None,
-                     progress_every: int = 1) -> list:
+                     progress_every: int = 1, provider=None) -> list:
     """The streamed part of exact_exploitability: for each job, the last street's values
     summed into the closing lines of the street before, per deal of that street (as in
     zero_sums). `chunks`, a range of chunk numbers (default every chunk), streams only
-    those: one shard of a split evaluation."""
+    those: one shard of a split evaluation.
+
+    provider(st, parents, children) -> hsig, a list over the last template's nodes of
+    (n, L, H, A) per-hand strategies for the chunk's deals. The default is
+    StoredStrategy(abstraction, sigma[-1], players), today's lookup; a re-solving provider
+    (core/solvers/resolve.Resolver) re-solves each deal of the street before once and serves
+    all of its children. Chunks are streamed in order, so a deal's children arrive together
+    (split_chunks starts every shard on a new deal)."""
     T = len(pt.templates)
     D1 = pt.streets[-1].num_deals
     hsig_upper = [list(row) for row in sigma[:T - 1]]
     reach = forward(pt, hsig_upper)
     _, closing = street_reach(pt.templates[T - 2], hsig_upper[T - 2], reach[T - 2][0])
     tp_last = pt.templates[T - 1]
+    if provider is None:
+        provider = StoredStrategy(abstraction, sigma[T - 1], tp_last.players)
     agg = zero_sums(pt)
     total = D1 * last.num_children
     if chunks is None:
@@ -340,9 +366,7 @@ def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256,
         parents, children = np.divmod(flat, last.num_children)
         st = last.street(parents, children)
         root = next_root(closing, st.parent)
-        rows = abstraction.rows(parents, children)
-        ids = [np.asarray(abstraction.ids(st, parents, children, p)) for p in (0, 1)]
-        hsig = [s[rows[:, None], :, ids[q]].transpose(0, 2, 1, 3) for s, q in zip(sigma[T - 1], tp_last.players)]
+        hsig = provider(st, parents, children)
         nodes, _ = street_reach(tp_last, hsig, root)
         for j, (p, mode) in enumerate(_JOBS):
             V, _ = street_values(tp_last, st, pt.contrib[T - 1], hsig, nodes, p, mode, True)
