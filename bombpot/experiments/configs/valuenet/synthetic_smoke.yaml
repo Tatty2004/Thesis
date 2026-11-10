@@ -1,0 +1,32 @@
+# Checks the training path end to end on synthetic shards (bombpot/valuenet/data.py,
+# write_synthetic_shard): real-deck layout (H = 1,035), known zero-sum target function.
+#   python -m bombpot.experiments.valuenet.train --config bombpot/experiments/configs/valuenet/synthetic_smoke.yaml --synthetic
+data:
+  dir: results/valuenet/net/data/synthetic_real
+  holdout_fraction: 0.2
+  block: 512
+features:
+  method: joint_2d
+  n_bins: 20
+  board: onehot
+  num_ranks: 13
+  num_suits: 4
+model:
+  depth: 7
+  width: 500
+  zero_sum: true
+train:
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  schedule: cosine
+  huber_delta: 1.0
+  seed: 0
+  threads: 8
+  device: auto
+  max_minutes: 8
+synthetic:
+  shards: 4
+  samples: 2000
+  flop_pairs: 25
+  noise: 0.02
