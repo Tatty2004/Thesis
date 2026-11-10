@@ -5,7 +5,7 @@ read by stream `net` (`bombpot/valuenet/`, `experiments/valuenet/train.py`).
 
 ```
 python -m bombpot.experiments.valuenet.datagen --n N --seed S --out FILE.h5 \
-    [--tol 1e-3] [--iters 5000] [--template limit] [--variant cfr+|dcfr] [--deck 13,4] [--per-flop 1]
+    [--tol 1e-3] [--iters 5000] [--template limit] [--variant dcfr|cfr+] [--deck 13,4] [--per-flop 1]
 ```
 Slurm: `scripts/ionic/valuenet_datagen.sbatch` (array job, one shard per task, seed = task id).
 Needs h5py: run with `/n/fs/scratch/rb5709/envs/torch/bin/python`.
@@ -21,8 +21,8 @@ Needs h5py: run with `/n/fs/scratch/rb5709/envs/torch/bin/python`.
   part gets a uniform random share of the mass, recursively; 10% near-uniform (1 + 0.1 U);
   10% very peaked (1 to H/20 hands).
 - **Subgame**: the river below that turn deal (every ordered (river A, river B) pair), each
-  player has P/2 in, river betting from the template, solved with CFR+ (alternating, linear
-  averaging; `--variant dcfr` for DCFR) until its exploitability is <= tol pots (checked every 10 iterations) or
+  player has P/2 in, river betting from the template, solved with DCFR (alternating; alpha 1.5, beta 0,
+  gamma 2; `--variant cfr+` for CFR+, about 2.9x slower to the same tolerance) until its exploitability is <= tol pots (checked every 10 iterations) or
   `--iters` iterations.
 - **Template**: only `limit` exists until the no-limit engine (stream `engine`) is merged: the
   limit river (bet 4 chips, a bet and one raise), with the sampled pot only setting the chips
