@@ -139,6 +139,12 @@ No river is the one artificial cut in R4. It is the largest real-deck game that 
     - The full-width reference itself matches the tree solver on a three-street game (`tests/test_range_cfr.py`, slow, 2.4M terminals).
   - Real-deck cost, measured: an exact evaluation of a three-street strategy streams 3.9M river deals at about 12.5 ms each, **about 14 hours** on this laptop (peak about 6 GB). Real-deck R5 runs and their evaluation need the cluster or more speed.
   - Not yet run on the real deck: fitting buckets for all 2,070 turn deals, and a real-deck sampled solve.
+- **E, safe river re-solving (PLAN_valuenet.md; built 2026-11-10, branch vn-resolve).** `core/solvers/resolve.py`: the gadget of Burch et al. 2014 per (turn deal, line class, line), solved with CFR+ over all of a turn deal's rivers and lines at once, batched over turn deals. The exact evaluator takes a river provider (`StoredStrategy`, bit-identical to the old lookup; `Resolver`, which re-solves each turn deal once). Small deck (`tests/holdem/test_holdem_resolve.py`, `scripts/resolve_gate.py`, tol 1e-4 chips per root, CFR+ capped at 3,000 iterations):
+  - Equilibrium (full-width DCFR, 2,000 iterations: 1.29e-5, it doesn't reach 1e-6): every river re-solved safely gives 4.00e-5, within the bound 1.73e-4 (half the summed gadget gaps); the value moves by 6e-7.
+  - After merging line classes (786abef) the limit gates reproduce exactly (==); the pot game's river (4 classes, one all-in) re-solves per class and agrees with full-width RangeCFR to 1e-10.
+  - Poor blueprints, safe: 20-iteration DCFR 0.149 -> 0.117; kmeans_2d (k = 3, 200 sampled iterations) 0.275 -> 0.211. Unsafe (no gadget): from the equilibrium 1.29e-5 -> 0.0282 (the failure safe re-solving prevents); 20-iteration DCFR 0.149 -> 0.082 and kmeans_2d 0.275 -> 0.159 (better than safe there, but with per-hand violations up to 7.7 and 270 x mass: no guarantee).
+  - Per hand at every root: the opponent's best-response value minus its blueprint value is at most the gadget's NashConv, summed over hands (largest violation / mass 5.3e-5).
+  - Cost: about 15-30 s per re-solve on the small deck when batched (loaded host). Real deck, one turn deal, 16 threads: 1.05 s per CFR+ iteration for one line, 2.46 s for five (9 GB); a whole turn deal (25 limit lines) is about 12 s per iteration per player, so hours per turn deal at the small deck's 500-3,000 iterations.
 
 ## Next phase
 

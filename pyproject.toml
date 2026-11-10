@@ -11,6 +11,7 @@ dependencies = ["numpy", "scipy", "numba", "POT", "pyyaml", "matplotlib"]
 
 [project.optional-dependencies]
 test = ["pytest", "open_spiel"]
+valuenet = ["torch", "h5py"]
 
 [tool.setuptools.packages.find]
 include = ["bombpot*"]

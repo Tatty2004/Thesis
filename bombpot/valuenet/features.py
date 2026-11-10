@@ -1,0 +1,201 @@
+"""Network inputs, numpy only: ranges as histograms over equity bins, the boards, the pot.
+
+A hand's turn-end equity on a board is its average showdown share over the river runouts
+against a uniform opponent range (0 where it can't be held), so `equity` is (H, 2) per turn
+deal. The bins are fixed on [0, 1], not quantiles, so a bin means the same thing on every
+board:
+
+  avg_1d    n bins over the mean of the two equities              (n_bins bins)
+  joint_2d  an n x n grid over (equity A, equity B), A major       (n_bins**2 bins)
+
+Bin b of method avg_1d holds equities in [b/n, (b+1)/n), the last bin also holds 1.0.
+
+A range's histogram is the range mass in each bin (so it sums to the range's mass over the
+hands counted). Per-bin outputs map back to hands through the same assignment: a hand
+takes its bin's value (`to_hands`). Everything here takes a leading batch axis or not.
+
+The board encoding is board-relative and game-agnostic: card ids are `rank * num_suits +
+suit` (the core convention), and the game only enters through num_ranks and num_suits.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+
+import numpy as np
+
+METHODS = ("avg_1d", "joint_2d")
+BOARDS = ("onehot", "ids", "none")
+
+
+@dataclass(frozen=True)
+class FeatureConfig:
+    """How samples become network inputs. Saved with every model (to_dict / from_dict).
+
+    method       "avg_1d" or "joint_2d"
+    n_bins       bins per axis (avg_1d: n_bins bins; joint_2d: n_bins x n_bins)
+    board        "onehot" (rank one-hots and suit patterns, `board_features`), "ids" (card
+                 ids for a learned embedding, `board_ids`), or "none"
+    num_ranks, num_suits   the deck, for decoding card ids
+    board_cards  cards per board at the end of the turn
+    """
+    method: str = "joint_2d"
+    n_bins: int = 20
+    board: str = "onehot"
+    num_ranks: int = 13
+    num_suits: int = 4
+    board_cards: int = 4
+
+    def __post_init__(self):
+        if self.method not in METHODS:
+            raise ValueError(f"unknown method {self.method!r}")
+        if self.board not in BOARDS:
+            raise ValueError(f"unknown board encoding {self.board!r}")
+        if self.n_bins < 1:
+            raise ValueError("n_bins must be positive")
+
+    @property
+    def num_bins(self) -> int:
+        return self.n_bins if self.method == "avg_1d" else self.n_bins ** 2
+
+    @property
+    def num_cards(self) -> int:
+        return self.num_ranks * self.num_suits
+
+    @property
+    def board_dim(self) -> int:
+        """Width of the board input: floats for "onehot", card ids for "ids", 0 for "none"."""
+        k = self.board_cards
+        if self.board == "onehot":
+            return 2 * (k * self.num_ranks + k * (k - 1) // 2 + k) + k * k
+        return 2 * k if self.board == "ids" else 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FeatureConfig":
+        return cls(**d)
+
+
+# Equity bins ------------------------------------------------------------------------------
+
+
+def _axis(x: np.ndarray, n: int) -> np.ndarray:
+    return np.clip(np.floor(np.asarray(x) * n).astype(np.int64), 0, n - 1)
+
+
+def bin_index(equity: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
+    """(..., H, 2) equities -> (..., H) bin of each hand."""
+    equity = np.asarray(equity)
+    n = cfg.n_bins
+    if cfg.method == "avg_1d":
+        return _axis(equity.mean(axis=-1), n)
+    return _axis(equity[..., 0], n) * n + _axis(equity[..., 1], n)
+
+
+def histogram(rng: np.ndarray, bins: np.ndarray, num_bins: int, possible: np.ndarray | None = None) -> np.ndarray:
+    """(..., H) range mass and (..., H) bins -> (..., num_bins) mass per bin. Hands where
+    `possible` is False count for nothing, whatever their range says."""
+    rng = np.asarray(rng, dtype=np.float64)
+    if possible is not None:
+        rng = np.where(possible, rng, 0.0)
+    rng, bins = np.broadcast_arrays(rng, bins)
+    lead = rng.shape[:-1]
+    n = int(np.prod(lead))
+    flat = bins.reshape(n, -1) + np.arange(n)[:, None] * num_bins
+    out = np.bincount(flat.ravel(), weights=rng.reshape(n, -1).ravel(), minlength=n * num_bins)
+    return out.reshape(lead + (num_bins,))
+
+
+def bin_means(values: np.ndarray, weights: np.ndarray, bins: np.ndarray, num_bins: int) -> tuple:
+    """Weighted mean of `values` (..., H) in each bin, with `weights` (..., H) (a range):
+    returns (means, mass), each (..., num_bins); means are 0 in bins with no mass."""
+    mass = histogram(weights, bins, num_bins)
+    total = histogram(np.asarray(weights, dtype=np.float64) * values, bins, num_bins)
+    return np.divide(total, mass, out=np.zeros_like(total), where=mass > 0), mass
+
+
+def to_hands(bin_values: np.ndarray, bins: np.ndarray) -> np.ndarray:
+    """(..., num_bins) per-bin values and (..., H) bins -> (..., H): each hand its bin's value."""
+    bin_values, bins = np.asarray(bin_values), np.asarray(bins)
+    lead = np.broadcast_shapes(bin_values.shape[:-1], bins.shape[:-1])
+    bv = np.broadcast_to(bin_values, lead + bin_values.shape[-1:])
+    b = np.broadcast_to(bins, lead + bins.shape[-1:])
+    return np.take_along_axis(bv, b, axis=-1)
+
+
+# Boards, pot and stack --------------------------------------------------------------------
+
+
+def canonical_boards(boards: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
+    """(..., 2, k) card ids with each board's flop (all but its last card) sorted by rank
+    then suit, high first, and the turn card last. Card order within a flop carries no
+    information, so this makes the encoding independent of it."""
+    boards = np.asarray(boards, dtype=np.int64)
+    flop = -np.sort(-boards[..., :-1], axis=-1)  # card id order is rank-major
+    return np.concatenate([flop, boards[..., -1:]], axis=-1)
+
+
+def board_features(boards: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
+    """(..., 2, k) card ids -> (..., board_dim) floats: per board, each card's rank one-hot,
+    same-suit indicators for every pair of its cards, and the one-hot of its largest suit
+    count (1..k); then same-suit indicators between every card of board A and of board B."""
+    b = canonical_boards(boards, cfg)
+    k, R, S = cfg.board_cards, cfg.num_ranks, cfg.num_suits
+    if b.shape[-2:] != (2, k):
+        raise ValueError(f"boards must be (..., 2, {k})")
+    rank, suit = b // S, b % S
+    lead = b.shape[:-2]
+    iu = np.triu_indices(k, 1)
+    parts = []
+    for side in (0, 1):
+        r, s = rank[..., side, :], suit[..., side, :]
+        parts.append(np.eye(R)[r].reshape(lead + (k * R,)))
+        same = s[..., :, None] == s[..., None, :]
+        parts.append(same[..., iu[0], iu[1]].astype(float))
+        counts = (s[..., :, None] == np.arange(S)).sum(axis=-2).max(axis=-1)
+        parts.append(np.eye(k)[counts - 1])
+    cross = suit[..., 0, :, None] == suit[..., 1, None, :]
+    parts.append(cross.reshape(lead + (k * k,)).astype(float))
+    return np.concatenate(parts, axis=-1)
+
+
+def board_ids(boards: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
+    """(..., 2, k) card ids -> (..., 2k) canonical card ids, for an embedding."""
+    b = canonical_boards(boards, cfg)
+    return b.reshape(b.shape[:-2] + (2 * cfg.board_cards,))
+
+
+def encode_boards(boards: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
+    """The board input of the configured kind: float32 features, int64 ids, or (..., 0)."""
+    boards = np.asarray(boards)
+    if cfg.board == "onehot":
+        return board_features(boards, cfg).astype(np.float32)
+    if cfg.board == "ids":
+        return board_ids(boards, cfg)
+    return np.zeros(boards.shape[:-2] + (0,), dtype=np.float32)
+
+
+NUM_SCALARS = 2
+
+
+def pot_features(pot, stack) -> np.ndarray:
+    """(...,) pot and chips behind -> (..., 2): log pot and log(1 + stack / pot)."""
+    pot, stack = np.asarray(pot, dtype=np.float64), np.asarray(stack, dtype=np.float64)
+    return np.stack([np.log(pot), np.log1p(stack / pot)], axis=-1).astype(np.float32)
+
+
+def normalize(rng: np.ndarray, possible: np.ndarray | None = None) -> tuple:
+    """A range over the possible hands, normalized to sum 1, and its mass before. A range with
+    no mass becomes uniform over the possible hands (or over all hands if none is marked),
+    so the network always sees a valid range. Works on (..., H)."""
+    rng = np.asarray(rng, dtype=np.float64)
+    if possible is None:
+        possible = np.ones(rng.shape, dtype=bool)
+    possible = np.broadcast_to(possible, rng.shape)
+    rng = np.where(possible, rng, 0.0)
+    mass = rng.sum(axis=-1, keepdims=True)
+    fallback = np.where(possible.any(axis=-1, keepdims=True), possible, True).astype(float)
+    fallback /= fallback.sum(axis=-1, keepdims=True)
+    out = np.where(mass > 0, rng / np.where(mass > 0, mass, 1.0), fallback)
+    return out, mass[..., 0]
