@@ -60,6 +60,11 @@ class CFRDSolver(RangeCFR):
         alternating updates (False) the two players' passes use different solves."""
         super().__init__(pt, variant, leaf=leaf, **kw)
         self.simultaneous = simultaneous
+        # DeepStack-style grading: each player's leaf root values, averaged with the trunk's
+        # weights. In solver units a root value is linear in the other player's realization
+        # plan, so this average is each player's value against the other's CFR-D average.
+        self.cfv_cum = [[None, None] for _ in leaf.classes]
+        self.weight_sum = [0.0, 0.0]
         self.river_cum = [[np.zeros((leaf.street.num_deals, lc.num_lines, len(pt.hands), len(a)))
                            for a in lc.template.actions] for lc in leaf.classes]
 
@@ -67,6 +72,12 @@ class CFRDSolver(RangeCFR):
         """Add the leaf's latest solve (its memo) to the river average of `players`."""
         closing, subs = self.leaf._memo
         w = self.average_weight()
+        for q in players:
+            self.weight_sum[q] += w
+        for c, sub in enumerate(subs):
+            for q in players:
+                v = w * sub.values[q]
+                self.cfv_cum[c][q] = v if self.cfv_cum[c][q] is None else self.cfv_cum[c][q] + v
         for lc, sub, roots, cum in zip(self.leaf.classes, subs, self.leaf.roots(closing), self.river_cum):
             if lc.template.num_nodes == 0:
                 continue
@@ -114,6 +125,10 @@ class CFRDSolver(RangeCFR):
         t = float(self.t)
         return {"cfr": 1.0, "cfr+": t, "dcfr": t ** self.gamma}[self.variant]
 
+    def cfv_average(self, c: int, q: int) -> np.ndarray:
+        """Player q's averaged leaf root values at river class c, (D_turn, L_c, H), solver units."""
+        return self.cfv_cum[c][q] / self.weight_sum[q]
+
     def river_average(self) -> list:
         out = []
         for row in self.river_cum:
@@ -122,6 +137,35 @@ class CFRDSolver(RangeCFR):
                 total = c.sum(-1, keepdims=True)
                 out[-1].append(np.where(total > 0, c / np.where(total > 0, total, 1.0), 1.0 / c.shape[-1]))
         return out
+
+
+def deepstack_grade(full, upper, solver, tol, iters, variant="dcfr"):
+    """DeepStack-style grading: every river re-solved safely (resolve_batch with the gadget),
+    for each player p separately, from the trunk average's closing reach of p, with the
+    opponent's T values its averaged leaf root values (CFRDSolver.cfv_average); node k of each
+    river class plays the re-solve of its acting player. Exact exploitability on the full tree."""
+    from bombpot.core.solvers.resolve import resolve_batch
+
+    leaf = solver.leaf
+    avg = solver.hand_sigma(solver.average_strategy())
+    _, closing = forward(upper, avg, closing=True)
+    D1 = upper.streets[-1].num_deals
+    river, gaps, its = [], 0.0, 0
+    for c, (lc, roots) in enumerate(zip(leaf.classes, leaf.roots(closing))):
+        if lc.template.num_nodes == 0:
+            river.append([])
+            continue
+        res = {}
+        for p in (0, 1):
+            o = 1 - p
+            res[p] = resolve_batch(leaf.street, lc.template, lc.contrib, leaf.group, D1, roots[p], roots[o],
+                                   solver.cfv_average(c, o), p, variant, iters, tol, safe=True)
+            gaps += float(np.sum(res[p].gap))
+            its = max(its, int(np.max(res[p].iterations)))
+        river.append([res[q].strategy[k] for k, q in enumerate(lc.template.players)])
+    out = RangeCFR(full).exploitability([avg[0], avg[1], river])
+    out.update(resolve_gap_sum=gaps, resolve_iterations=its)
+    return out
 
 
 def main(argv=None):
@@ -174,16 +218,17 @@ def main(argv=None):
             avg = solver.hand_sigma(solver.average_strategy())
             exact = grade(full, upper, river, avg, a.resolve_tol, a.sub_iters, a.inner, a.check_every)
             cfrd = RangeCFR(full).exploitability([avg[0], avg[1], solver.river_average()])
+            deep = deepstack_grade(full, upper, solver, a.resolve_tol, a.sub_iters, a.inner)
             its = [s["iterations"] for s in leaf.stats]
             result["leaf"][solver.t] = {
-                "wall_time": solver.solve_seconds, "flop_turn": flop_turn, "exact": exact, "cfrd": cfrd,
+                "wall_time": solver.solve_seconds, "flop_turn": flop_turn, "exact": exact, "cfrd": cfrd, "deepstack": deep,
                 "leaf_solves": len(its), "leaf_iterations_mean": float(np.mean(its)),
                 "leaf_iterations_max": int(max(its)),
                 "leaf_max_exploitability": max(s["max_exploitability"] for s in leaf.stats),
                 "grade_seconds": time.perf_counter() - t0}
             ref = result["lossless"].get(solver.t, {}).get("exploitability", float("nan"))
             print(f"leaf it {solver.t:4d} {solver.solve_seconds:8.1f}s flop+turn {flop_turn['exploitability']:.5f} "
-                  f"exact {exact['exploitability']:.5f} cfr-d {cfrd['exploitability']:.5f} (lossless {ref:.5f}) leaf its mean {np.mean(its):.0f} "
+                  f"exact {exact['exploitability']:.5f} cfr-d {cfrd['exploitability']:.5f} deepstack {deep['exploitability']:.5f} (lossless {ref:.5f}) leaf its mean {np.mean(its):.0f} "
                   f"max {max(its)}", flush=True)
             save()
 
