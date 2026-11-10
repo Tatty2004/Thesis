@@ -19,15 +19,18 @@ exactly when the hand values do (sum_b h_p[b] target_p[b] = sum_i range_p[i] cfv
 the weighted loss is the per-hand loss minus the within-bin spread, which no per-bin output
 can remove (reported as the floor of the per-hand error).
 
-Split. A sample belongs to the held-out set when the hash of its flop pair (each flop sorted,
-the two flops sorted, so board order doesn't matter) falls below `holdout_fraction`. All
-samples of a flop pair land on the same side, whichever shard holds them.
+Split. A sample belongs to the held-out set when the hash of its flop pair's isomorphism
+class falls below `holdout_fraction`. The class key is the smallest (sorted flops, flops in
+order) over every relabeling of the suits and both board orders, so strategically identical
+flop pairs (Ah7c2d/KsKd9h and Ad7h2c/KsKc9d) land on the same side and nothing leaks from
+train to held-out. All samples of a class land on the same side, whichever shard holds them.
 
 h5py is imported inside the functions that need it.
 """
 from __future__ import annotations
 
 import hashlib
+from itertools import permutations
 from pathlib import Path
 
 import numpy as np
@@ -38,19 +41,36 @@ from bombpot.valuenet.features import (FeatureConfig, bin_index, bin_means, enco
 FIELDS = ("flops", "turn", "range0", "range1", "equity", "pot", "stack", "cfv0", "cfv1")
 
 
-def flop_pair_hash(flops: np.ndarray, salt: str = "valuenet-split") -> np.ndarray:
-    """(N, 2, 3) flops -> (N,) numbers in [0, 1), the same for every sample of a flop pair."""
-    f = np.sort(np.asarray(flops, dtype=np.int64), axis=-1)
+def flop_pair_key(a, b, num_suits: int = 4) -> tuple:
+    """The isomorphism class of a flop pair: the smallest key over suit relabelings and
+    board order. Cards are `rank * num_suits + suit`."""
+    best = None
+    for perm in permutations(range(num_suits)):
+        relabel = [tuple(sorted((c // num_suits) * num_suits + perm[c % num_suits] for c in f)) for f in (a, b)]
+        key = tuple(sorted(relabel))
+        if best is None or key < best:
+            best = key
+    return best
+
+
+def flop_pair_hash(flops: np.ndarray, salt: str = "valuenet-split", num_suits: int = 4) -> np.ndarray:
+    """(N, 2, 3) flops -> (N,) numbers in [0, 1), the same for every flop pair of a class."""
+    f = np.asarray(flops, dtype=np.int64)
     out = np.empty(len(f))
+    cache: dict = {}
     for n, (a, b) in enumerate(f):
-        key = sorted([tuple(a), tuple(b)])
-        h = hashlib.blake2b(f"{salt}:{key}".encode(), digest_size=8).digest()
-        out[n] = int.from_bytes(h, "little") / 2.0 ** 64
+        raw = (tuple(a), tuple(b))
+        if raw not in cache:
+            key = flop_pair_key(a.tolist(), b.tolist(), num_suits)
+            h = hashlib.blake2b(f"{salt}:{key}".encode(), digest_size=8).digest()
+            cache[raw] = int.from_bytes(h, "little") / 2.0 ** 64
+        out[n] = cache[raw]
     return out
 
 
-def heldout_mask(flops: np.ndarray, fraction: float, salt: str = "valuenet-split") -> np.ndarray:
-    return flop_pair_hash(flops, salt) < fraction
+def heldout_mask(flops: np.ndarray, fraction: float, salt: str = "valuenet-split",
+                 num_suits: int = 4) -> np.ndarray:
+    return flop_pair_hash(flops, salt, num_suits) < fraction
 
 
 def featurize(raw: dict, cfg: FeatureConfig) -> dict:
@@ -85,7 +105,7 @@ class ShardSet:
         if not self.paths:
             raise FileNotFoundError(f"no *.h5 shards in {directory}")
         self.files = [h5py.File(p, "r") for p in self.paths]
-        self.heldout = [heldout_mask(f["flops"][:], holdout_fraction, salt) for f in self.files]
+        self.heldout = [heldout_mask(f["flops"][:], holdout_fraction, salt, cfg.num_suits) for f in self.files]
 
     def close(self) -> None:
         for f in self.files:

@@ -53,9 +53,25 @@ def test_split_by_flop_pair(shard_dir):
         assert side.setdefault(k, h) == h  # one side per flop pair
     assert 0 < held.mean() < 1
     swapped = flops[:, ::-1, ::-1]  # board order and card order don't matter
-    assert np.array_equal(heldout_mask(swapped, 0.3), held)
+    assert np.array_equal(heldout_mask(swapped, 0.3, num_suits=CFG.num_suits), held)
     n = {sp: sum(len(b["scalars"]) for b in s.batches(sp, 100, np.random.default_rng(0), buffer=2))
          for sp in ("train", "heldout", "all")}
     assert n["train"] == s.count("train") and n["heldout"] == s.count("heldout") and n["all"] == 900
     assert n["train"] + n["heldout"] == 900
     s.close()
+
+
+def test_split_respects_suit_isomorphism():
+    from bombpot.valuenet.data import flop_pair_key
+
+    def cards(s):  # "Ah7c2d" -> ids, suits c d h s
+        r, su = "23456789TJQKA", "cdhs"
+        return [r.index(s[i]) * 4 + su.index(s[i + 1]) for i in range(0, len(s), 2)]
+
+    a = (cards("Ah7c2d"), cards("KsKd9h"))
+    b = (cards("Ad7h2c"), cards("KsKc9d"))  # the relabeling h->d, c->h, d->c, s->s
+    c = (cards("Ah7c2d"), cards("KsKd9d"))  # a different class: 9 shares the K's suit
+    assert flop_pair_key(*a) == flop_pair_key(*b) == flop_pair_key(*b[::-1])
+    assert flop_pair_key(*a) != flop_pair_key(*c)
+    flops = np.array([[a[0], a[1]], [b[1], b[0]]])
+    assert heldout_mask(flops, 0.5)[0] == heldout_mask(flops, 0.5)[1]
