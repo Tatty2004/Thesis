@@ -32,18 +32,22 @@ POT_RANGE = (2.0, 200.0)
 
 UNITS = (
     "Units. range0/range1 (N, H): each player's reach over the hand list hands[hand_set[n]], zero on hands "
-    "that share a card with the boards (flops and turn cards), normalized to sum 1. The river subgame is "
-    "solved with chance weight kappa = 1 / (rest (rest - 1)) per valid river deal (rest = cards left after "
-    "the boards and both hands), i.e. the river chance only, so for any hand pair the valid river deals' "
-    "weights sum to 1. cfv0/cfv1 (N, H) are the root counterfactual values of the average strategy, "
-    "cfv_p[i] = sum_j range_o[j] [i, j disjoint] E_river[payoff of p | i, j] / pot, in pots, with payoffs "
-    "counting all chips (the pot/2 each already has in included), so sum_i range0[i] cfv0[i] + "
-    "sum_j range1[j] cfv1[j] = 0. subgame_exploitability (N,) is (br0 . range0 + br1 . range1) / 2 divided "
-    "by the reach mass sum_ij range0[i] range1[j] [disjoint], in pots. equity (N, H, 2) is each hand's "
-    "turn-end equity per board: its mean showdown share over the river deals it can see, against a uniform "
-    "opponent range. Inverse transform for the solver (a turn-end leaf at turn deal d with unnormalized "
-    "closing reaches R0, R1 and pot P): zero R_o on hands impossible at d, then agg_p = cfv_p x P x "
-    "sum(R_o) x turn.kappa[d], which is the range solver's units (chance weight x opponent reach x payoff)."
+    "that share a card with the boards (flops and turn cards; possible[n] marks the others, which can also "
+    "have range 0), normalized to sum 1. The river subgame is solved with chance weight kappa = river.scale "
+    "= 1 / (rest (rest - 1)) per valid river deal (rest = cards left after both boards and both hands), the "
+    "river chance only, so for any hand pair its valid river deals' weights sum to 1. cfv0/cfv1 (N, H) are "
+    "the root counterfactual values of the subgame's average strategy profile (one profile for both "
+    "players), in pots: cfv_p[i] = sum over opponent hands j compatible with i (no shared card) of "
+    "range_o[j] E_river[payoff of p | i, j] / pot, NOT renormalized per hand over the compatible j. Payoffs "
+    "count all chips (the pot/2 each has in included), so zero_sum_residual = range0 . cfv0 + range1 . cfv1 "
+    "= 0 up to rounding. subgame_exploitability = (br0 . range0 + br1 . range1) / 2 / mass / pot. stack = "
+    "chips behind for each player at the start of the river. equity (N, H, 2): each hand's mean showdown "
+    "share per board over the river deals it can see, against a uniform opponent range. Inverse transform "
+    "(a turn-end leaf at turn deal d, closing line with pot P, unnormalized closing reaches R0, R1): agg_p[i] "
+    "= cfv_p[i] x P x sum over possible j of R_o[j] x turn.kappa[d], with turn.kappa[d] the turn street's "
+    "chance weight (holdem_public_tree(game, upto=2).streets[1].kappa[d]) and no other factor: the real "
+    "river's weight per deal is turn.kappa[d] x river.scale, and river.scale is already inside cfv. This is "
+    "the range solver's units (chance weight x opponent reach x payoff)."
 )
 
 
@@ -134,7 +138,9 @@ def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, template
     r0, r1 = random_range(rng, valid, strength), random_range(rng, valid, strength)
     pot = spot["pot"]
     sub = solve_subgame(st, fp.upper.templates[2], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
-    return {"range0": r0, "range1": r1, "equity": equity, "cfv0": sub.values[0] / pot, "cfv1": sub.values[1] / pot,
+    cfv0, cfv1 = sub.values[0] / pot, sub.values[1] / pot  # both from the one average-strategy profile
+    return {"range0": r0, "range1": r1, "possible": valid, "equity": equity, "cfv0": cfv0, "cfv1": cfv1,
+            "zero_sum_residual": float(r0 @ cfv0 + r1 @ cfv1),
             "subgame_exploitability": sub.exploitability / pot, "iters": sub.iterations, "seconds": sub.seconds,
             "mass": sub.mass}
 
@@ -159,9 +165,9 @@ class Shard:
 
     PER_SAMPLE = {"flops": ((2, 3), "i1"), "turn": ((2,), "i1"), "hand_set": ((), "i4"), "pot": ((), "f4"),
                   "stack": ((), "f4"), "subgame_exploitability": ((), "f4"), "iters": ((), "i4"),
-                  "seconds": ((), "f4"), "mass": ((), "f4")}
+                  "seconds": ((), "f4"), "mass": ((), "f4"), "zero_sum_residual": ((), "f4")}
     PER_HAND = {"range0": ((), "f4"), "range1": ((), "f4"), "cfv0": ((), "f4"), "cfv1": ((), "f4"),
-                "equity": ((2,), "f4")}
+                "equity": ((2,), "f4"), "possible": ((), "bool")}
 
     def __init__(self, path, H: int, attrs: dict):
         try:

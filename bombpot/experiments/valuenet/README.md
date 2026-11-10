@@ -29,22 +29,34 @@ Needs h5py: run with `/n/fs/scratch/rb5709/envs/torch/bin/python`.
   already in. Shards made with it are for pipeline testing; real training data needs the
   no-limit template (pot-relative sizes, so values in pots generalize across P).
 
-## Datasets (N samples, H hands per flop pair; H = 1035 on 52 cards)
+## Files and hand lists
+
+A file holds **many flop pairs**: by default every sample draws its own flop pair (`--per-flop K`
+keeps a pair for K samples, each with its own turn). H is the same for every sample of a file
+(all 2-card hands avoiding both flops: C(46, 2) = 1035 on 52 cards, 36 on the 5 x 3 test deck),
+but which cards make up hand i depends on the flops. So `hands` (P, H, 2) holds one hand list
+per flop pair, in `holdem_public_tree(game, upto=2).hands` order, and `hand_set[n]` says which
+row sample n uses: hand i of sample n is `hands[hand_set[n], i]`. Every per-hand array
+(`range0`, `cfv0`, `possible`, ...) is indexed by that i.
+
+## Datasets (N samples)
 
 | name | shape | dtype | meaning |
 |---|---|---|---|
 | `flops` | (N, 2, 3) | int8 | board A's and board B's flop cards, sorted |
 | `turn` | (N, 2) | int8 | turn card of board A, of board B |
-| `hands` | (P, H, 2) | int8 | the hand lists (all 2-card hands not on the flops, in `holdem_public_tree` order) |
-| `hand_set` | (N,) | int32 | which row of `hands` sample n uses (one row per flop pair) |
-| `range0`, `range1` | (N, H) | float32 | normalized ranges (above) |
+| `hands` | (P, H, 2) | int8 | one hand list per flop pair (above) |
+| `hand_set` | (N,) | int32 | which row of `hands` sample n uses |
+| `possible` | (N, H) | bool | hand avoids both boards (flops and turns); a possible hand can still have range 0 |
+| `range0`, `range1` | (N, H) | float32 | ranges, zero where not possible, normalized to sum 1 |
 | `equity` | (N, H, 2) | float32 | turn-end equity per hand per board (below) |
-| `pot`, `stack` | (N,) | float32 | P and the stack behind, in chips |
-| `cfv0`, `cfv1` | (N, H) | float32 | root counterfactual values, **in pots** (below) |
+| `pot` | (N,) | float32 | P, chips in the pot at the start of the river (P/2 from each player) |
+| `stack` | (N,) | float32 | chips **behind** for each player at the start of the river (101 - P/2) |
+| `cfv0`, `cfv1` | (N, H) | float32 | root counterfactual values of the average strategy, **in pots** (below) |
+| `zero_sum_residual` | (N,) | float32 | range0 . cfv0 + range1 . cfv1 (computed in float64; 0 up to rounding) |
 | `subgame_exploitability` | (N,) | float32 | the solved subgame's exploitability, in pots |
-| `iters` | (N,) | int32 | CFR+ iterations used |
+| `iters` | (N,) | int32 | solver iterations used |
 | `seconds`, `mass` | (N,) | float32 | solve time; reach mass sum_ij range0[i] range1[j] [i, j disjoint] |
-
 Cards: `card = rank * num_suits + suit`, ranks `23456789TJQKA`, suits `cdhs`.
 File attributes: `num_ranks`, `num_suits`, `board_cards`, `num_boards`, `ante`, `stack`,
 `bet_sizes`, `template`, `pot_range`, `tol_pots`, `iters_cap`, `variant`, `seed`, `git`,
@@ -52,27 +64,38 @@ File attributes: `num_ranks`, `num_suits`, `board_cards`, `num_boards`, `ante`, 
 
 ## Units
 
-The river subgame is solved with chance weight kappa = 1 / (rest (rest - 1)) per valid river
-deal (rest = cards left after both boards and both hands): the river chance only, with no
-turn-deal or hand-pair factor, so for any hand pair the valid river deals' weights sum to 1.
-With normalized ranges the values are then "values given the ranges":
+The river subgame is solved with chance weight `river.scale` = 1 / (rest (rest - 1)) per valid
+river deal (rest = cards left after both boards and both hands): the river chance only, with no
+turn-deal or hand-pair factor, so for any hand pair its valid river deals' weights sum to 1.
+cfv0 and cfv1 are the root values of **one** strategy profile, the subgame's average strategy:
 
-    cfv_p[i] = sum_j range_o[j] [i, j disjoint] E_river[payoff of p | hands i, j] / P
+    cfv_p[i] = sum over opponent hands j compatible with i (no shared card) of
+               range_o[j] x E_river[payoff of p | hands i, j] / P
 
-with payoffs counting all chips (the P/2 each already has in included), so
-sum_i range0[i] cfv0[i] + sum_j range1[j] cfv1[j] = 0 up to float32 rounding. Hands that can't
-be held have cfv 0. `subgame_exploitability` = (br0 . range0 + br1 . range1) / 2 / mass / P.
+**Card removal:** the sum runs over the compatible j only and is **not** renormalized per hand
+(it is not divided by the compatible mass sum_j compatible range_o[j]). Payoffs count all chips
+(the P/2 each already has in included), so `zero_sum_residual` = sum_i range0[i] cfv0[i] +
+sum_j range1[j] cfv1[j] = 0 up to rounding. Hands that can't be held have cfv 0.
+`subgame_exploitability` = (br0 . range0 + br1 . range1) / 2 / mass / P.
 
 `equity[n, i, b]` = hand i's mean showdown share on board b over the river deals it can see,
 against a uniform opponent range (`CardStreet.equity` on the river street, averaged over the
 deals where the hand is possible); 0 for impossible hands.
 
 **Inverse transform** (what a leaf provider such as NetLeaf must do to return the range solver's
-units, `range_cfr.backward`'s `leaf`): at turn deal d with closing reaches R0, R1 (unnormalized,
-(H,) each) and pot P, zero R_o on hands impossible at d, normalize to get the input ranges, then
+units, `range_cfr.backward`'s `leaf`). At turn deal d, turn line l, close c, with pot P[l, c]
+and unnormalized closing reaches R0, R1 (each (H,), from `forward(pt, hsig, closing=True)`):
+the input ranges are R_p zeroed where not possible at d and normalized, and
 
-    agg_p = cfv_p x P x sum(R_o) x turn.kappa[d]
+    agg_p[d, l, c, i] = cfv_p[i] x P[l, c] x (sum over possible j of R_o[d, l, c, j]) x turn.kappa[d]
 
-where `turn.kappa[d]` is the turn street's chance weight (`pt.streets[1].kappa`). This is
-tested exactly in `tests/holdem/test_datagen.py` (a fixed strategy evaluated on the real river
-with unnormalized reaches equals the transformed values).
+with `turn.kappa[d]` = `holdem_public_tree(game, upto=2).streets[1].kappa[d]`, the turn street's
+chance weight of one valid (hand0, hand1, turn deal), and **no other factor**: the real river's
+chance weight per river deal is `turn.kappa[d] x river.scale`, and `river.scale` is already
+inside cfv. (Not times the number of river deals: the sum over river deals is inside cfv too.)
+P[l, c] = 2 x `pt.contrib[2][l * closes + c]` in the limit game.
+
+Tested to 1e-12 in `tests/holdem/test_datagen.py`: for every line and close of three turn deals
+of the small deck, exact cfvs in these units (a fixed river strategy, river-only chance weights,
+normalized ranges), rescaled this way, reproduce the agg of a leaf that replays the real river
+(the leaf that `tests/holdem/test_leaf.py` ties to the full three-street tree).
