@@ -1,0 +1,253 @@
+"""Training data for the turn-end value network (PLAN_valuenet.md, section F): random river
+subgames solved exactly by core/solvers/subgame.py, one HDF5 shard per job.
+
+A sample: a random flop pair (two disjoint 3-card flops), random turn cards (one per board),
+a random pot (log-uniform on [2, 200], stacks 101 - pot / 2 each), and random ranges for both
+players over the hands possible at that turn deal (DeepStack's recursive random splitting,
+plus some near-uniform and some very peaked ranges), normalized to sum 1. The river subgame of
+that turn deal is solved from those ranges to `tol` pots with chance weights of the river
+alone (each valid river deal of a hand pair weighs 1 / (rest x (rest - 1))), so its values are
+"values given normalized ranges". The format is in experiments/valuenet/README.md.
+
+The no-limit engine isn't merged yet, so the river betting is the limit template
+(`--template limit`, bets of 4 chips), with the sampled pot only setting the chips already in.
+
+    python -m bombpot.experiments.valuenet.datagen --n 100 --seed 0 --out results/valuenet/subgame/shard_0.h5
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import time
+from pathlib import Path
+
+import numpy as np
+
+from bombpot.core.solvers.subgame import solve_subgame
+from bombpot.holdem import Holdem
+from bombpot.holdem.public import HoldemRiver, holdem_public_tree
+
+STACK = 101.0  # chips each player has, ante included (PLAN_valuenet.md: the game)
+POT_RANGE = (2.0, 200.0)
+
+UNITS = (
+    "Units. range0/range1 (N, H): each player's reach over the hand list hands[hand_set[n]], zero on hands "
+    "that share a card with the boards (flops and turn cards), normalized to sum 1. The river subgame is "
+    "solved with chance weight kappa = 1 / (rest (rest - 1)) per valid river deal (rest = cards left after "
+    "the boards and both hands), i.e. the river chance only, so for any hand pair the valid river deals' "
+    "weights sum to 1. cfv0/cfv1 (N, H) are the root counterfactual values of the average strategy, "
+    "cfv_p[i] = sum_j range_o[j] [i, j disjoint] E_river[payoff of p | i, j] / pot, in pots, with payoffs "
+    "counting all chips (the pot/2 each already has in included), so sum_i range0[i] cfv0[i] + "
+    "sum_j range1[j] cfv1[j] = 0. subgame_exploitability (N,) is (br0 . range0 + br1 . range1) / 2 divided "
+    "by the reach mass sum_ij range0[i] range1[j] [disjoint], in pots. equity (N, H, 2) is each hand's "
+    "turn-end equity per board: its mean showdown share over the river deals it can see, against a uniform "
+    "opponent range. Inverse transform for the solver (a turn-end leaf at turn deal d with unnormalized "
+    "closing reaches R0, R1 and pot P): zero R_o on hands impossible at d, then agg_p = cfv_p x P x "
+    "sum(R_o) x turn.kappa[d], which is the range solver's units (chance weight x opponent reach x payoff)."
+)
+
+
+# Sampling -------------------------------------------------------------------------------------
+
+
+def random_range(rng, valid: np.ndarray, strength: np.ndarray) -> np.ndarray:
+    """A random range over the hands where `valid`, summing to 1 (zeros elsewhere).
+
+    80%: recursive random splitting (DeepStack): the hands, in order of strength (half the
+    time) or in random order, are split at a random point and each part gets a random share of
+    the mass, recursively. 10%: near-uniform. 10%: very peaked (a few hands)."""
+    idx = np.flatnonzero(valid)
+    n = len(idx)
+    out = np.zeros(len(valid))
+    u = rng.random()
+    if u < 0.1:
+        x = 1.0 + 0.1 * rng.random(n)
+    elif u < 0.2:
+        k = int(rng.integers(1, max(2, n // 20) + 1))
+        x = np.zeros(n)
+        x[rng.choice(n, size=k, replace=False)] = rng.random(k) + 1e-3
+    else:
+        order = np.argsort(strength[idx], kind="stable") if rng.random() < 0.5 else rng.permutation(n)
+        x = np.zeros(n)
+        stack = [(0, n, 1.0)]
+        while stack:
+            lo, hi, m = stack.pop()
+            if hi - lo == 1:
+                x[order[lo]] = m
+                continue
+            cut = int(rng.integers(lo + 1, hi))
+            p = rng.random()
+            stack.append((lo, cut, m * p))
+            stack.append((cut, hi, m * (1.0 - p)))
+    out[idx] = x
+    return out / out.sum()
+
+
+def sample_spot(rng, num_ranks: int, num_suits: int) -> dict:
+    """Random flop pair, turn cards and pot."""
+    cards = rng.permutation(num_ranks * num_suits)
+    flops = (tuple(sorted(int(c) for c in cards[:3])), tuple(sorted(int(c) for c in cards[3:6])))
+    pot = float(np.exp(rng.uniform(np.log(POT_RANGE[0]), np.log(POT_RANGE[1]))))
+    return {"flops": flops, "turn": (int(cards[6]), int(cards[7])), "pot": pot, "stack": STACK - pot / 2}
+
+
+class FlopPair:
+    """The pieces built once per flop pair: game, flop+turn tree (for the turn deals and the
+    hands), river provider."""
+
+    def __init__(self, flops, num_ranks: int, num_suits: int):
+        self.game = Holdem(num_ranks=num_ranks, num_suits=num_suits, board_cards=(3, 1, 1), flops=flops,
+                           bet_sizes=(2, 4, 4))
+        self.upper = holdem_public_tree(self.game, upto=2)
+        self.river = HoldemRiver(self.game, self.upper)
+        self.hands = np.array(self.upper.hands, dtype=np.int64)
+
+    def turn_deal(self, turn) -> int:
+        hit = np.flatnonzero((self.river.turn_cards == np.array(turn)).all(axis=1))
+        assert len(hit) == 1
+        return int(hit[0])
+
+    def river_street(self, d: int):
+        """The river CardStreet of turn deal d, with chance weights of the river only."""
+        st = self.river.street(*self.river.all_children([d]))
+        st.kappa = np.full(st.num_deals, self.river.scale)
+        return st
+
+
+def turn_equity(st) -> np.ndarray:
+    """(H, 2): each hand's mean showdown share per board over the river deals it can see."""
+    eq = st.equity()  # (D, H, B), 0 where the hand can't be held
+    seen = st.valid.sum(axis=0)
+    return np.divide(eq.sum(axis=0), seen[:, None], out=np.zeros(eq.shape[1:]), where=seen[:, None] > 0)
+
+
+def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, template: str = "limit",
+                 variant: str = "cfr+") -> dict:
+    """One sample: ranges, equity and the solved subgame (values and exploitability in pots)."""
+    if template != "limit":
+        raise ValueError("only the limit river template exists until the no-limit engine is merged")
+    d = fp.turn_deal(spot["turn"])
+    valid = fp.upper.streets[1].valid[d]
+    st = fp.river_street(d)
+    equity = turn_equity(st)
+    strength = equity.mean(axis=1)
+    r0, r1 = random_range(rng, valid, strength), random_range(rng, valid, strength)
+    pot = spot["pot"]
+    sub = solve_subgame(st, fp.upper.templates[2], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
+    return {"range0": r0, "range1": r1, "equity": equity, "cfv0": sub.values[0] / pot, "cfv1": sub.values[1] / pot,
+            "subgame_exploitability": sub.exploitability / pot, "iters": sub.iterations, "seconds": sub.seconds,
+            "mass": sub.mass}
+
+
+# Shards ------------------------------------------------------------------------------------
+
+
+def git_hash() -> str:
+    root = Path(__file__).resolve().parents[3]
+    try:
+        h = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True,
+                           check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", "bombpot", "pyproject.toml"], cwd=root,
+                               capture_output=True, text=True).stdout.strip()
+        return h + (" dirty" if dirty else "")
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+class Shard:
+    """An HDF5 shard, grown one sample at a time (so a killed job keeps what it solved)."""
+
+    PER_SAMPLE = {"flops": ((2, 3), "i1"), "turn": ((2,), "i1"), "hand_set": ((), "i4"), "pot": ((), "f4"),
+                  "stack": ((), "f4"), "subgame_exploitability": ((), "f4"), "iters": ((), "i4"),
+                  "seconds": ((), "f4"), "mass": ((), "f4")}
+    PER_HAND = {"range0": ((), "f4"), "range1": ((), "f4"), "cfv0": ((), "f4"), "cfv1": ((), "f4"),
+                "equity": ((2,), "f4")}
+
+    def __init__(self, path, H: int, attrs: dict):
+        try:
+            import h5py
+        except ImportError as e:  # h5py lives in the torch environment (CLAUDE.md, Stack)
+            raise ImportError("datagen shards need h5py: use /n/fs/scratch/rb5709/envs/torch/bin/python") from e
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.f = h5py.File(path, "w")
+        self.n, self.H = 0, H
+        for k, v in attrs.items():
+            self.f.attrs[k] = v
+        for name, (shape, dt) in self.PER_SAMPLE.items():
+            self.f.create_dataset(name, (0,) + shape, dt, maxshape=(None,) + shape, chunks=(256,) + shape)
+        for name, (shape, dt) in self.PER_HAND.items():
+            self.f.create_dataset(name, (0, H) + shape, dt, maxshape=(None, H) + shape, chunks=(64, H) + shape,
+                                  compression="gzip", compression_opts=4)
+        self.f.create_dataset("hands", (0, H, 2), "i1", maxshape=(None, H, 2), chunks=(16, H, 2))
+        self.hand_sets = 0
+
+    def add_hands(self, hands: np.ndarray) -> int:
+        ds = self.f["hands"]
+        ds.resize(self.hand_sets + 1, axis=0)
+        ds[self.hand_sets] = hands
+        self.hand_sets += 1
+        return self.hand_sets - 1
+
+    def add(self, row: dict) -> None:
+        for name in list(self.PER_SAMPLE) + list(self.PER_HAND):
+            ds = self.f[name]
+            ds.resize(self.n + 1, axis=0)
+            ds[self.n] = row[name]
+        self.n += 1
+        self.f.flush()
+
+    def close(self) -> None:
+        self.f.attrs["n"] = self.n
+        self.f.close()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--n", type=int, required=True, help="samples")
+    ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--out", required=True, help="the shard (.h5)")
+    ap.add_argument("--tol", type=float, default=1e-3, help="subgame exploitability target, in pots")
+    ap.add_argument("--iters", type=int, default=5000, help="iteration cap per subgame")
+    ap.add_argument("--template", default="limit", choices=["limit"])
+    ap.add_argument("--variant", default="cfr+", choices=["cfr+", "dcfr"], help="subgame solver")
+    ap.add_argument("--deck", default="13,4", help="ranks,suits (default the real deck)")
+    ap.add_argument("--per-flop", type=int, default=1, help="samples per flop pair (each with its own turn)")
+    ap.add_argument("--log-every", type=int, default=1)
+    a = ap.parse_args(argv)
+    num_ranks, num_suits = (int(x) for x in a.deck.split(","))
+    rng = np.random.default_rng(a.seed)
+    attrs = {"num_ranks": num_ranks, "num_suits": num_suits, "board_cards": "3,1,1", "num_boards": 2,
+             "ante": 1.0, "stack": STACK, "bet_sizes": "2,4,4 (limit; river bet 4)", "template": a.template,
+             "pot_range": "log-uniform on [2, 200], stack = 101 - pot/2", "tol_pots": a.tol, "iters_cap": a.iters,
+             "variant": a.variant, "seed": a.seed, "git": git_hash(), "per_flop": a.per_flop,
+             "card_encoding": "card = rank * num_suits + suit, ranks 23456789TJQKA, suits cdhs", "units": UNITS}
+    shard = None
+    start = time.perf_counter()
+    fp = None
+    for n in range(a.n):
+        spot = sample_spot(rng, num_ranks, num_suits)
+        if n % a.per_flop == 0:
+            fp = FlopPair(spot["flops"], num_ranks, num_suits)
+            if shard is None:
+                shard = Shard(a.out, len(fp.hands), attrs)
+            hand_set = shard.add_hands(fp.hands)
+        else:  # keep the flop pair, draw new turn cards from what's left
+            used = {c for f in fp.game.flops for c in f}
+            rest = rng.permutation([c for c in range(num_ranks * num_suits) if c not in used])
+            spot["flops"], spot["turn"] = fp.game.flops, (int(rest[0]), int(rest[1]))
+        t0 = time.perf_counter()
+        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.template, a.variant)
+        row.update(flops=np.array(spot["flops"]), turn=np.array(spot["turn"]), hand_set=hand_set, pot=spot["pot"],
+                   stack=spot["stack"], seconds=time.perf_counter() - t0)
+        shard.add(row)
+        if (n + 1) % a.log_every == 0 or n + 1 == a.n:
+            el = time.perf_counter() - start
+            print(f"sample {n + 1}/{a.n}  pot {spot['pot']:7.2f}  iters {row['iters']:5d}  expl "
+                  f"{row['subgame_exploitability']:.2e} pots  solve {row['seconds']:6.1f}s  elapsed {el:7.0f}s  "
+                  f"({el / (n + 1):.1f}s/sample)", flush=True)
+    if shard is not None:
+        shard.close()
+
+
+if __name__ == "__main__":
+    main()
