@@ -133,6 +133,24 @@ def test_split_evaluation_adds_up_with_both_providers(setup, name):
                                                                                  provider=make())
 
 
+def test_per_class_strategy_on_a_one_class_game_equals_one_class_storage(setup):
+    # The same strategy given as sigma[t][c][k] (one class per street) and as the sampled solver's
+    # sigma[t][k]: the same sums, in zero_sums' plain layout either way, so shards combine alike.
+    upper, river, abstractions = setup
+    a = abstractions["kmeans_2d"]
+    sigma = random_storage(upper, river, a, 4)
+    classed = [[row] for row in sigma]
+    want = last_street_sums(upper, river, a, sigma, chunk=700)
+    got = last_street_sums(upper, river, a, classed, chunk=700)
+    assert all(isinstance(x, np.ndarray) and x.shape == z.shape and np.array_equal(x, y)
+               for x, y, z in zip(got, want, zero_sums(upper)))
+    assert exact_exploitability(upper, river, a, classed, chunk=700) == finish_exploitability(upper, sigma, want)
+    r = Resolver(upper, river, classed, stored(upper, a, sigma), iters=20, deals=[5])
+    r1 = Resolver(upper, river, sigma, stored(upper, a, sigma), iters=20, deals=[5])
+    assert exact_exploitability(upper, river, a, classed, chunk=700, provider=r) == \
+        exact_exploitability(upper, river, a, sigma, chunk=700, provider=r1)
+
+
 # The subgame solver -----------------------------------------------------------------------------
 
 
