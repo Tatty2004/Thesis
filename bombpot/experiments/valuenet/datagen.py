@@ -200,7 +200,8 @@ def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant:
     r0, r1 = random_range(rng, valid, strength), random_range(rng, valid, strength)
     pot = spot["pot"]
     if solver == "fused":
-        sub = solve_subgame_fused(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, dtype=dtype)
+        sub = solve_subgame_fused(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, dtype=dtype,
+                                  keep_strategy=False)
     elif solver == "subgame" and dtype == "float64":
         sub = solve_subgame(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
     else:
