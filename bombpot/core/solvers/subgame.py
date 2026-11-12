@@ -79,10 +79,25 @@ class SubgameCFR(RangeCFR):
         self.template = template
         self.root_ranges = (r0, r1)
         self.root = tuple(np.ascontiguousarray(r[self.group]) for r in (r0, r1))  # (D, L, H)
+        self._ones = (np.ones((D, L, H)), np.ones((D, L, H)))
+        self._within = None
 
     def reach(self, hsig) -> list:
         nodes, _ = class_reach(self.template, hsig[0][0], self.root)
+        self._within, _ = class_reach(self.template, hsig[0][0], self._ones)
         return [[nodes]]
+
+    def own_reach(self, t: int, c: int, k: int, reach) -> np.ndarray:
+        """The acting player's reach of node k *within the subgame* (from a root reach of 1),
+        the weight of its average strategy. A hand's root reach is a constant factor of its
+        own reach at every node, so for a hand with positive root reach the average is the same
+        as with the full reach. A hand with root reach 0 would otherwise have no average at
+        all (uniform play), and its root value would be the value of uniform play; this way its
+        average is its regret-minimizing play against the opponent, and its root value
+        converges to its best-response value like every other hand's. Whoever takes root
+        values for all hands (a leaf provider, a value network's targets) needs that: the
+        street above decides from them whether such a hand should come here."""
+        return self._within[k][self.template.players[k]][..., None]
 
     def per_group(self, x: np.ndarray) -> np.ndarray:
         """(D, L, H) per deal -> (G, L, H) summed over each subgame's deals."""
@@ -105,16 +120,22 @@ class SubgameCFR(RangeCFR):
         raw = ((br[0] * r0).sum(-1) + (br[1] * r1).sum(-1)) / 2
         mass = self.mass()
         expl = np.divide(raw, mass, out=np.zeros_like(raw), where=mass > 0)
+        cfv_gap = ((br[0] - values[0]).sum(-1) + (br[1] - values[1]).sum(-1)) / 2
         return {"values": values, "br_values": br, "exploitability": expl, "exploitability_raw": raw,
-                "mass": mass}
+                "mass": mass, "cfv_gap": cfv_gap}
 
     def solve(self, iters: int, tol: float | None = None, check_every: int = 10, criterion: str = "max") -> dict:
         """Iterate until the error is <= tol, checked every `check_every` iterations, or until
         `iters` iterations. criterion "max": every subgame's exploitability (chips per unit of
         its reach mass); "total": the sum of the subgames' exploitability_raw (solver units:
         with the game's own chance weights, the batch's share of the whole game's error in
-        chips). Returns evaluate() of the final average strategy."""
-        if criterion not in ("max", "total"):
+        chips); "cfv": the sum of the subgames' cfv_gap, i.e. over both players and *every* hand,
+        whatever its own root reach, of best-response root value - root value, halved (solver
+        units). It bounds "total" when root reaches are at most 1, and it is the error of the
+        root values as a leaf provider hands them out: a hand's root value doesn't contain its
+        own reach, so a hand that is rare here weighs as much in the street above's regrets as
+        any other. Returns evaluate() of the final average strategy."""
+        if criterion not in ("max", "total", "cfv"):
             raise ValueError(f"unknown criterion {criterion!r}")
         if self.template.num_nodes == 0:  # no betting (all-in): a showdown, nothing to solve
             return self.evaluate()
@@ -123,7 +144,8 @@ class SubgameCFR(RangeCFR):
             self.iteration()
             if tol is not None and (self.t % check_every == 0 or self.t == iters):
                 ev, at = self.evaluate(), self.t
-                err = ev["exploitability"].max() if criterion == "max" else ev["exploitability_raw"].sum()
+                err = (ev["exploitability"].max() if criterion == "max" else
+                       ev["exploitability_raw"].sum() if criterion == "total" else ev["cfv_gap"].sum())
                 if err <= tol:
                     break
         return ev if at == self.t else self.evaluate()
@@ -141,6 +163,7 @@ class Subgame:
     mass: object            # root reach mass
     seconds: float = 0.0
     solver: object = field(default=None, repr=False)
+    cfv_gap: object = None      # sum over both players and every hand of br value - value, / 2
 
 
 def solve_subgames(street, template, contrib, reach0, reach1, group=None, variant: str = "cfr+", iters: int = 1000,
@@ -157,7 +180,7 @@ def solve_subgames(street, template, contrib, reach0, reach1, group=None, varian
     ev = s.solve(iters, tol, check_every, criterion)
     strategy = s.hand_sigma(s.average_strategy())[0][0]
     return Subgame(ev["values"], ev["br_values"], strategy, s.t, ev["exploitability"], ev["exploitability_raw"],
-                   ev["mass"], time.perf_counter() - start, s if keep_solver else None)
+                   ev["mass"], time.perf_counter() - start, s if keep_solver else None, ev["cfv_gap"])
 
 
 def solve_subgame(street, template, contrib, reach0, reach1, variant: str = "cfr+", iters: int = 1000,
@@ -223,7 +246,7 @@ class ExactRiverLeaf:
                                           for a, b in zip(x, y)):
             return self._memo[1]
         betting = sum(lc.template.num_nodes > 0 for lc in self.classes)
-        tol = None if self.tol is None else (self.tol / max(betting, 1) if self.criterion == "total" else self.tol)
+        tol = None if self.tol is None else (self.tol if self.criterion == "max" else self.tol / max(betting, 1))
         subs = []
         for lc, roots in zip(self.classes, self.roots(closing)):
             subs.append(solve_subgames(self.street, lc.template, lc.contrib, roots[0], roots[1], self.group,
@@ -232,6 +255,7 @@ class ExactRiverLeaf:
         self.stats.append({"iterations": max(s.iterations for s in subs),
                            "max_exploitability": max(float(s.exploitability.max()) for s in subs),
                            "total_exploitability_raw": sum(float(s.exploitability_raw.sum()) for s in subs),
+                           "total_cfv_gap": sum(float(s.cfv_gap.sum()) for s in subs),
                            "seconds": sum(s.seconds for s in subs)})
         self._memo = (tuple(tuple(np.array(r) for r in c) for c in closing), subs)
         return subs
