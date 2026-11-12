@@ -137,3 +137,26 @@ def test_rescaled_normalized_values_reproduce_the_real_river(template):
                     np.testing.assert_allclose(agg, w, rtol=1e-12, atol=1e-12 * np.abs(w).max())
                 checked += 1
     assert checked == 3 * full.num_lines(2)
+
+
+@pytest.mark.parametrize("template", ["limit", "pot"])
+def test_fused_solver_gives_the_same_rows_as_the_subgame_solver(template):
+    # The default solver (core/solvers/fused.py) against the batched one: the same sample,
+    # every stored number equal in float64; float32 solves to the same tolerance.
+    rows = {}
+    for key, kw in (("fused", {}), ("subgame", {"solver": "subgame"}), ("f32", {"dtype": "float32"})):
+        rng = np.random.default_rng(3)
+        s = sample_spot(rng, 5, 3)
+        fp = FlopPair(s["flops"], 5, 3, template)
+        s.update(fp.sample_betting(rng))
+        rows[key] = solve_sample(fp, s, rng, tol=1e-3, iters=2000, variant="dcfr", **kw)
+    a, b, c = rows["fused"], rows["subgame"], rows["f32"]
+    assert 0 < a["iters"] == b["iters"] < 2000
+    for k in ("range0", "range1", "possible", "equity", "cfv0", "cfv1"):
+        np.testing.assert_array_equal(a[k], b[k], err_msg=k)
+    for k in ("zero_sum_residual", "subgame_exploitability", "mass"):
+        assert a[k] == b[k], k
+    assert c["subgame_exploitability"] <= 1e-3
+    assert np.abs(c["cfv0"] - a["cfv0"]).max() < 0.05 and np.abs(c["cfv1"] - a["cfv1"]).max() < 0.05
+    with pytest.raises(ValueError):
+        solve_sample(fp, s, rng, tol=1e-3, iters=10, solver="subgame", dtype="float32")
