@@ -37,7 +37,7 @@ from numba import prange
 from bombpot.core.jit import kernel
 from bombpot.core.public import PublicTree
 from bombpot.core.solvers.cfr import IterativeSolver
-from bombpot.core.solvers.range_cfr import backward, class_reach, class_values, close_values, forward, next_root
+from bombpot.core.solvers.range_cfr import backward, close_values, forward, next_root, street_reach, street_values
 
 
 @kernel
@@ -340,8 +340,9 @@ def exact_exploitability(pt: PublicTree, last, abstraction, sigma, chunk: int = 
     """Best responses and value of a stored strategy in the full game, every last-street
     deal included, streamed `chunk` deals at a time so memory stays bounded. If given,
     progress(chunks done, total chunks) is called every `progress_every` chunks and after
-    the last, so long evaluations can log an ETA. `provider` (see last_street_sums) supplies
-    the last street's strategy; by default the stored one, sigma[-1] through `abstraction`."""
+    the last, so long evaluations can log an ETA. sigma is per line class, sigma[t][c][k], or the
+    sampled solver's one-class sigma[t][k] (see last_street_sums). `provider` supplies the last
+    street's strategy; by default the stored one, sigma[-1] through `abstraction`."""
     sums = last_street_sums(pt, last, abstraction, sigma, chunk, progress=progress, progress_every=progress_every,
                             provider=provider)
     return finish_exploitability(pt, sigma, sums)
@@ -362,12 +363,39 @@ def split_chunks(num_parents: int, num_children: int, chunk: int, shards: int) -
     return ranges
 
 
+def _per_class(pt: PublicTree, sigma) -> list:
+    """A strategy as sigma[t][c][k], given so or in the sampled solver's one-class storage
+    sigma[t][k] (ValueError if a street of pt then has several classes)."""
+    if isinstance(sigma[0][0], np.ndarray):
+        one_class(pt)
+        return [[row] for row in sigma]
+    return [[list(c) for c in row] for row in sigma]
+
+
+def _single_class(pt: PublicTree) -> bool:
+    """One line class on every street: the sums are then plain arrays, as before classes."""
+    return all(len(row) == 1 for row in pt.classes)
+
+
+def _zero_class_sums(pt: PublicTree) -> list:
+    """[job][c] (D1, L_c, closes_c, H) zeros, one per class of the street before the last."""
+    T = len(pt.classes)
+    out = []
+    for _ in _JOBS:
+        row = []
+        for c, lc in enumerate(pt.classes[T - 2]):
+            shape = pt.shape(T - 2, c) + (lc.template.num_closes,)
+            row.append(np.moveaxis(np.zeros(shape), 3, 2))
+        out.append(row)
+    return out
+
+
 def zero_sums(pt: PublicTree) -> list:
-    """Empty last-street sums, one per job, each (D1, L, closes, H)."""
-    cls = one_class(pt)
-    T = len(cls)
-    shape = pt.shape(T - 2, 0) + (cls[T - 2].template.num_closes,)
-    return [np.moveaxis(np.zeros(shape), 3, 2) for _ in _JOBS]
+    """Empty last-street sums, one per job: (D1, L, closes, H) for a game with one line class
+    per street, else a list over the classes c of the street before the last of
+    (D1, L_c, closes_c, H)."""
+    sums = _zero_class_sums(pt)
+    return [row[0] for row in sums] if _single_class(pt) else sums
 
 
 def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256, chunks=None, progress=None,
@@ -377,23 +405,28 @@ def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256,
     zero_sums). `chunks`, a range of chunk numbers (default every chunk), streams only
     those: one shard of a split evaluation.
 
+    sigma: the strategy of every street, sigma[t][c][k] per line class (upper streets per hand,
+    (D_t, L_c, H, A); the last street stored, (rows, L_c, ids, A), read through
+    `abstraction`), or the sampled solver's one-class storage sigma[t][k]. Every class is
+    graded, all-in (zero-node) classes included, which on the last street are a showdown. The
+    sums come back in zero_sums' layout, which depends on pt alone, not on how sigma is stored.
+
     provider(st, parents, children) -> hsig[c][k], per line class c of the last street and node
     k of its template, (n, L_c, H, A) per-hand strategies for the chunk's deals. The default is
-    StoredStrategy.one_class(abstraction, sigma[-1], players), today's lookup; a re-solving
-    provider (core/solvers/resolve.Resolver) re-solves each deal of the street before once and
-    serves all of its children. Chunks are streamed in order, so a deal's children arrive
-    together (split_chunks starts every shard on a new deal). This evaluator itself still needs
-    one class per street (one_class)."""
-    cls = one_class(pt)
-    T = len(cls)
+    StoredStrategy(abstraction, sigma[-1], players), the stored lookup; a re-solving provider
+    (core/solvers/resolve.Resolver) re-solves each deal of the street before once and serves
+    all of its children. Chunks are streamed in order, so a deal's children arrive together
+    (split_chunks starts every shard on a new deal)."""
+    classes = pt.classes
+    T = len(classes)
     D1 = pt.streets[-1].num_deals
-    hsig_upper = [list(row) for row in sigma[:T - 1]]
-    reach = _unclassed(forward(pt, _classed(hsig_upper)))
-    _, closing = class_reach(cls[T - 2].template, hsig_upper[T - 2], reach[T - 2][0])
-    tp_last = cls[T - 1].template
+    full = _per_class(pt, sigma)
+    upper = full[:T - 1]
+    reach = forward(pt, upper)
+    _, closing = street_reach(classes[T - 2], upper[T - 2], [r[0] for r in reach[T - 2]])
     if provider is None:
-        provider = StoredStrategy.one_class(abstraction, sigma[T - 1], tp_last.players)
-    agg = zero_sums(pt)
+        provider = StoredStrategy(abstraction, full[T - 1], [lc.template.players for lc in classes[T - 1]])
+    agg = _zero_class_sums(pt)
     total = D1 * last.num_children
     if chunks is None:
         chunks = range(-(-total // chunk))
@@ -401,33 +434,34 @@ def last_street_sums(pt: PublicTree, last, abstraction, sigma, chunk: int = 256,
         flat = np.arange(c * chunk, min(total, (c + 1) * chunk))
         parents, children = np.divmod(flat, last.num_children)
         st = last.street(parents, children)
-        root = next_root([closing], cls[T - 2:T - 1], cls[T - 1:], st.parent)[0]
-        (hsig,) = provider(st, parents, children)
-        nodes, _ = class_reach(tp_last, hsig, root)
+        roots = next_root(closing, classes[T - 2], classes[T - 1], st.parent)
+        hsig = provider(st, parents, children)
+        nodes, _ = street_reach(classes[T - 1], hsig, roots)
         for j, (p, mode) in enumerate(_JOBS):
-            V, _ = class_values(tp_last, st, cls[T - 1].contrib, hsig, nodes, p, mode, True)
-            agg[j] += close_values([V[0]], cls[T - 2:T - 1], cls[T - 1:], st.parent, D1)[0]
+            V, _ = street_values(classes[T - 1], st, hsig, nodes, p, mode, True)
+            for a, x in zip(agg[j], close_values([v[0] for v in V], classes[T - 2], classes[T - 1], st.parent, D1)):
+                a += x
         if progress is not None and (done % progress_every == 0 or done == len(chunks)):
             progress(done, len(chunks))
-    return agg
+    return [row[0] for row in agg] if _single_class(pt) else agg
 
 
 def finish_exploitability(pt: PublicTree, sigma, sums) -> dict:
     """exact_exploitability's result from the last street's sums (last_street_sums, or the
-    shards' sums added into zero_sums): the streets above, bottom-up."""
-    cls = one_class(pt)
-    T = len(cls)
-    hsig_upper = [list(row) for row in sigma[:T - 1]]
-    reach = _unclassed(forward(pt, _classed(hsig_upper)))
+    shards' sums added into zero_sums): the streets above, bottom-up, every line class."""
+    classes = pt.classes
+    T = len(classes)
+    full = _per_class(pt, sigma)
+    upper = full[:T - 1]
+    reach = forward(pt, upper)
     out = []
     for j, (p, mode) in enumerate(_JOBS):
-        a = sums[j]
+        a = sums[j] if isinstance(sums[j], list) else [sums[j]]
         for t in range(T - 2, -1, -1):
-            V, _ = class_values(cls[t].template, pt.streets[t], cls[t].contrib, hsig_upper[t], reach[t], p, mode,
-                                False, a)
+            V, _ = street_values(classes[t], pt.streets[t], upper[t], reach[t], p, mode, False, a)
             if t > 0:
-                a = close_values([V[0]], cls[t - 1:t], cls[t:t + 1], pt.streets[t].parent,
-                                 pt.streets[t - 1].num_deals)[0]
-        out.append(float(V[0].sum()))
+                a = close_values([v[0] for v in V], classes[t - 1], classes[t], pt.streets[t].parent,
+                                 pt.streets[t - 1].num_deals)
+        out.append(float(V[0][0].sum()))
     br0, br1, value = out
     return {"exploitability": (br0 + br1) / 2, "br_value_p0": br0, "br_value_p1": br1, "game_value": value}
