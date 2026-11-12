@@ -33,6 +33,7 @@ import numpy as np
 from bombpot.core.game import CHANCE
 from bombpot.core.limit import CALL
 from bombpot.core.public import Template, _class_template, _walk
+from bombpot.core.solvers.fused import solve_subgame_fused
 from bombpot.core.solvers.subgame import line_template, solve_subgame
 from bombpot.holdem import Holdem
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
@@ -185,9 +186,12 @@ def turn_equity(st) -> np.ndarray:
     return np.divide(eq.sum(axis=0), seen[:, None], out=np.zeros(eq.shape[1:]), where=seen[:, None] > 0)
 
 
-def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant: str = "cfr+") -> dict:
+def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant: str = "cfr+",
+                 solver: str = "fused", dtype: str = "float64") -> dict:
     """One sample: ranges, equity and the solved subgame (values and exploitability in pots).
-    spot holds turn, template, pot and stack (sample_spot, then FlopPair.sample_betting)."""
+    spot holds turn, template, pot and stack (sample_spot, then FlopPair.sample_betting).
+    solver "fused" (core/solvers/fused.py: one compiled kernel per deal; in float64 the same
+    numbers as "subgame", bit for bit) or "subgame" (core/solvers/subgame.py, float64 only)."""
     d = fp.turn_deal(spot["turn"])
     valid = fp.upper.streets[1].valid[d]
     st = fp.river_street(d)
@@ -195,7 +199,12 @@ def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant:
     strength = equity.mean(axis=1)
     r0, r1 = random_range(rng, valid, strength), random_range(rng, valid, strength)
     pot = spot["pot"]
-    sub = solve_subgame(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
+    if solver == "fused":
+        sub = solve_subgame_fused(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, dtype=dtype)
+    elif solver == "subgame" and dtype == "float64":
+        sub = solve_subgame(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
+    else:
+        raise ValueError(f"solver {solver!r} with dtype {dtype!r}")
     cfv0, cfv1 = sub.values[0] / pot, sub.values[1] / pot  # both from the one average-strategy profile
     return {"range0": r0, "range1": r1, "possible": valid, "equity": equity, "cfv0": cfv0, "cfv1": cfv1,
             "zero_sum_residual": float(r0 @ cfv0 + r1 @ cfv1),
@@ -278,11 +287,21 @@ def main(argv=None):
     ap.add_argument("--spread", type=float, default=2.0, help="pot spread factor around the real lines (pot)")
     ap.add_argument("--variant", default="dcfr", choices=["cfr+", "dcfr"],
                     help="subgame solver (DCFR: 2.9x faster than CFR+ to 1e-3 pots on the real deck)")
+    ap.add_argument("--solver", default="fused", choices=["fused", "subgame"],
+                    help="fused: one compiled kernel per river deal (core/solvers/fused.py), the same numbers "
+                         "as subgame in float64; subgame: the batched range-solver passes")
+    ap.add_argument("--dtype", default="float64", choices=["float64", "float32"],
+                    help="solver precision (float32: fused only; values agree to rounding, not bit for bit)")
+    ap.add_argument("--threads", type=int, default=None, help="numba threads (default: NUMBA_NUM_THREADS)")
     ap.add_argument("--deck", default="13,4", help="ranks,suits (default the real deck)")
     ap.add_argument("--per-flop", type=int, default=1, help="samples per flop pair (each with its own turn)")
     ap.add_argument("--log-every", type=int, default=1)
     a = ap.parse_args(argv)
     num_ranks, num_suits = (int(x) for x in a.deck.split(","))
+    if a.threads is not None:
+        import numba
+
+        numba.set_num_threads(a.threads)
     rng = np.random.default_rng(a.seed)
     betting = ({"bet_sizes": "2,4,4 (limit; river bet 4)", "pot_range": "log-uniform on [2, 200], stack = 101 - pot/2"}
                if a.template == "limit" else
@@ -292,7 +311,7 @@ def main(argv=None):
     attrs = {"num_ranks": num_ranks, "num_suits": num_suits, "board_cards": "3,1,1", "num_boards": 2,
              "ante": 1.0, "total_chips": STACK, "template": a.template, "spread": a.spread, **betting,
              "tol_pots": a.tol, "iters_cap": a.iters,
-             "variant": a.variant, "seed": a.seed, "git": git_hash(), "per_flop": a.per_flop,
+             "variant": a.variant, "solver": a.solver, "solver_dtype": a.dtype, "seed": a.seed, "git": git_hash(), "per_flop": a.per_flop,
              "card_encoding": "card = rank * num_suits + suit, ranks 23456789TJQKA, suits cdhs", "units": UNITS}
     shard = None
     start = time.perf_counter()
@@ -310,7 +329,7 @@ def main(argv=None):
             spot["flops"], spot["turn"] = fp.game.flops, (int(rest[0]), int(rest[1]))
         spot.update(fp.sample_betting(rng, a.spread))
         t0 = time.perf_counter()
-        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.variant)
+        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.variant, a.solver, a.dtype)
         row.update(flops=np.array(spot["flops"]), turn=np.array(spot["turn"]), hand_set=hand_set, pot=spot["pot"],
                    stack=spot["stack"], line=spot["line"], pot_spread=spot["pot_spread"],
                    seconds=time.perf_counter() - t0)
