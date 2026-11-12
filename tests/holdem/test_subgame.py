@@ -4,8 +4,9 @@ A subgame entered with root ranges (r0, r1) is the same game as the one-street p
 whose chance matrix carries the ranges, W'[d, i, j] = W[d, i, j] r0[i] r1[j] (and S' likewise),
 entered with reach 1. On that dense tree plain RangeCFR applies; its counterfactual values
 and regrets are the subgame's times the acting player's own root reach, and its own reach
-the subgame's divided by it, so regret matching, CFR+'s floor and the average strategy are
-the same. Checked in lockstep and free-running, plus best responses, and the units of the
+is the subgame's reach within the subgame (SubgameCFR weights its average by that, not by the
+full reach, so that hands with root reach 0 have an average too), so regret matching, CFR+'s
+floor and the average strategy are the same. Checked in lockstep and free-running, plus best responses, and the units of the
 returned values against street_values directly.
 """
 import numpy as np
@@ -127,8 +128,8 @@ def test_subgame_matches_range_cfr_on_the_dense_game(setup, d, line):
                     want = ra[0][0][k] * r[p][None, None, :, None]
                     np.testing.assert_allclose(rb[0][0][k], want, rtol=0, atol=1e-13 * max(1.0, np.abs(want).max()))
         a.iteration()
-    # Whole updates in lockstep: from the same state (regrets x own root reach, averages /
-    # own root reach, the same strategy), one iteration gives the same state again. Free-running
+    # Whole updates in lockstep: from the same state (regrets x own root reach, the same
+    # averages, the same strategy), one iteration gives the same state again. Free-running
     # runs part ways at exact ties (a regret of 0 in one solver and 1e-22 in the other, see
     # tests/test_range_cfr.py), so they're compared this way.
     for it in range(20):
@@ -136,13 +137,13 @@ def test_subgame_matches_range_cfr_on_the_dense_game(setup, d, line):
         scale = [r[q][None, None, :, None] for q in template.players]
         b.sigma = [[[s.copy() for s in a.sigma[0][0]]]]
         b.regret = [[[x * c for x, c in zip(a.regret[0][0], scale)]]]
-        b.cum = [[[x / c for x, c in zip(a.cum[0][0], scale)]]]
+        b.cum = [[[x.copy() for x in a.cum[0][0]]]]
         a.iteration()
         b.iteration()
         for k, c in enumerate(scale):
             np.testing.assert_allclose(b.regret[0][0][k], a.regret[0][0][k] * c, rtol=1e-9,
                                        atol=1e-13 * np.abs(b.regret[0][0][k]).max())
-            np.testing.assert_allclose(b.cum[0][0][k] * c, a.cum[0][0][k], rtol=1e-11, atol=1e-15)
+            np.testing.assert_allclose(b.cum[0][0][k], a.cum[0][0][k], rtol=1e-11, atol=1e-15)
     # The same best responses and values of the average strategy.
     ev = a.evaluate()
     hsig = b.hand_sigma(a.average_strategy())
@@ -204,3 +205,53 @@ def test_a_batch_is_independent_subgames(setup):
             assert batch.exploitability[g, j] == pytest.approx(sub.exploitability, rel=1e-10)
             for k in range(len(sub.strategy)):
                 np.testing.assert_allclose(batch.strategy[k][group == g, j], sub.strategy[k], rtol=0, atol=1e-12)
+
+
+def test_hands_with_zero_root_reach_get_best_response_values(setup):
+    # Root values go to the street above for every hand, also for hands the player doesn't
+    # bring here (root reach 0). Their average strategy must be their regret-minimizing play
+    # (weighted by reach within the subgame), so that their value converges to the
+    # best-response value. Weighted by the full reach they have no average, play uniformly,
+    # and their value is uniform play's: a turn solve fed with those never learns to bring such
+    # a hand here (gate C1: CFR-D's composite stuck near 2 chips, the trunk near 0.14).
+    upper, river = setup
+    d, line = 33, 7
+    st = river.street(*river.all_children([d]))
+    template, contrib = river_line(upper, line)
+    valid = upper.streets[1].valid[d]
+    r = ranges(len(upper.hands), 4, valid)
+    zero = [np.flatnonzero(valid)[q::3] for q in (0, 1)]  # a third of each player's hands
+    for q in (0, 1):
+        r[q][zero[q]] = 0.0
+    sub = solve_subgames(st, template, [contrib], r[0][None, None], r[1][None, None], iters=300)
+    scale = max(np.abs(sub.br_values[q]).max() for q in (0, 1))
+    gaps = [(sub.br_values[q] - sub.values[q])[0, 0] for q in (0, 1)]
+    for q in (0, 1):
+        assert (gaps[q] >= -1e-15).all() and gaps[q][zero[q]].max() <= 0.01 * scale
+    assert float(sub.cfv_gap[0, 0]) == pytest.approx((gaps[0].sum() + gaps[1].sum()) / 2, rel=1e-12)
+    # criterion "cfv" stops on that sum over every hand; "total" weights hands by their root reach
+    tol = 0.02 * scale
+    cfv = solve_subgames(st, template, [contrib], r[0][None, None], r[1][None, None], iters=300, tol=tol,
+                         criterion="cfv")
+    assert cfv.iterations < 300 and float(cfv.cfv_gap.sum()) <= tol
+    assert float(cfv.exploitability_raw.sum()) <= float(cfv.cfv_gap.sum())
+    # The hands that are here play exactly as with the full reach as the weight: the root
+    # reach is a constant factor of it.
+    class FullReachAverage(SubgameCFR):
+        own_reach = RangeCFR.own_reach
+
+    a, b = (cls(st, template, [contrib], (r[0], r[1])) for cls in (SubgameCFR, FullReachAverage))
+    for _ in range(25):
+        a.iteration()
+        b.iteration()
+    for k, q in enumerate(template.players):
+        np.testing.assert_array_equal(a.sigma[0][0][k], b.sigma[0][0][k])  # the iterates don't depend on it
+        reached = b.cum[0][0][k].sum(-1) > 0
+        assert not reached[:, :, r[q] == 0].any() and reached[:, :, r[q] > 0].any()
+        np.testing.assert_allclose(a.average_strategy()[0][0][k][reached], b.average_strategy()[0][0][k][reached],
+                                   rtol=1e-9, atol=1e-12)
+    # ... and with that weight the hands that aren't here play uniformly, at a value far from
+    # their best response's.
+    ev = b.evaluate()
+    for q in (0, 1):
+        assert (ev["br_values"][q] - ev["values"][q])[0, 0][zero[q]].max() > 0.2 * scale
