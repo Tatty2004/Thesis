@@ -6,7 +6,8 @@ independent iteration per deal. `SubgameCFR` still runs it as the range solver r
 whole tree, one numpy-sized operation at a time over every deal (about 70 kernel calls per
 iteration on arrays of D x H, most of them memory-bound). Here one kernel call runs n whole
 iterations (forward, backward and update for both players, alternating) for each deal, in
-parallel over (sample, deal), with that deal's arrays in cache.
+parallel over (sample, deal), with that deal's arrays in cache. The average strategy is
+weighted by the reach within the subgame, as SubgameCFR's is (own_reach there says why).
 
 The arithmetic is the range solver's, step by step and in the same order (the fold and
 showdown sweeps of core/removal.py, with the bookkeeping changes described at the per-deal
@@ -208,7 +209,7 @@ def _iterate_kernel(valid, n_valid, kappa, order, group_end, mid, signs, n_mid, 
     root (S, 2, H); template arrays per sample (S, Kmax[, Amax]); coef (S, 2, Kmax, Amax);
     regret, cum, sigma flat, sample s's deal d at base[s] + d size[s], node k at off[s, k]
     within it, laid out (H, A_k); weight, pos, neg (S, n_iter) per iteration; consts = (0, 1/2,
-    2, boards, flush) and unif (S, Kmax) = 1 / actions in the state's dtype."""
+    2, boards, flush, 1) and unif (S, Kmax) = 1 / actions in the state's dtype."""
     S = root.shape[0]
     D, H = valid.shape
     Kmax = player.shape[1]
@@ -220,6 +221,7 @@ def _iterate_kernel(valid, n_valid, kappa, order, group_end, mid, signs, n_mid, 
             K = n_nodes[s]
             b0 = base[s] + d * size[s]
             reach = np.empty((2, Kmax, H), root.dtype)
+            within = np.empty((2, Kmax, H), root.dtype)  # reach from a root reach of 1: the averaging weight
             V = np.empty((Kmax, H), root.dtype)
             cv = np.empty((Amax, H), root.dtype)
             inst = np.empty(size[s], root.dtype)
@@ -232,13 +234,16 @@ def _iterate_kernel(valid, n_valid, kappa, order, group_end, mid, signs, n_mid, 
             vd, od, gd = valid[d], order[d], group_end[d]
             nv = n_valid[d]
             kap = kappa[d]
-            zero, flush = consts[0], consts[4]
+            zero, flush, one = consts[0], consts[4], consts[5]
             for it in range(n_iter):
                 for p in range(2):
                     for i in range(H):
                         reach[0, 0, i] = root[s, 0, i]
                         reach[1, 0, i] = root[s, 1, i]
+                        within[0, 0, i] = one
+                        within[1, 0, i] = one
                     _forward1(K, player[s], nact[s], kind[s], target[s], sigma, off[s], b0, reach)
+                    _forward1(K, player[s], nact[s], kind[s], target[s], sigma, off[s], b0, within)
                     for k in range(K - 1, -1, -1):
                         q = player[s, k]
                         A = nact[s, k]
@@ -274,7 +279,7 @@ def _iterate_kernel(valid, n_valid, kappa, order, group_end, mid, signs, n_mid, 
                         ik = off[s, k]
                         uniform = unif[s, k]
                         for i in range(H):
-                            w = w0 * reach[p, k, i]
+                            w = w0 * within[p, k, i]  # SubgameCFR.own_reach
                             tot = zero
                             for a in range(A):
                                 x = bk + i * A + a
@@ -503,7 +508,7 @@ class FusedSubgames:
         # denormals (slow arithmetic) after about a hundred iterations: there, negative regrets
         # above -1e-30 are set to 0. In float64 the threshold is -0.0, which nothing is above.
         flush = -1e-30 if self.dtype == np.float32 else -0.0
-        consts = np.array([0.0, 0.5, 2.0, order.shape[1], flush], self.dtype)
+        consts = np.array([0.0, 0.5, 2.0, order.shape[1], flush, 1.0], self.dtype)
         self._street = (np.ascontiguousarray(street.valid), n_valid, np.ascontiguousarray(street.kappa, dtype=self.dtype),
                         order, group_end, mid, h.signs.astype(self.dtype), n_mid, consts)
         self.seconds = 0.0

@@ -16,6 +16,7 @@
 
 PY=${PY:-/n/fs/scratch/rb5709/envs/torch/bin/python}
 source "$SLURM_SUBMIT_DIR/scripts/ionic/env.sh"
+export PYTHONPATH="$SLURM_SUBMIT_DIR${PYTHONPATH:+:$PYTHONPATH}"  # this checkout, not the editable install's
 N=${N:-200}
 TOL=${TOL:-1e-3}
 OUT=${OUT:-results/valuenet/data}
@@ -23,5 +24,6 @@ mkdir -p "$OUT"
 TASK=${SLURM_ARRAY_TASK_ID:-0}
 # Write to node-local disk and copy once at the end (one large write to scratch).
 LOCAL="${TMPDIR:-/tmp}/$USER-vn-$SLURM_JOB_ID-$TASK.h5"
-$PY -m bombpot.experiments.valuenet.datagen --n "$N" --seed "$TASK" --tol "$TOL" --out "$LOCAL" --log-every 5
+# EXTRA: more datagen arguments, e.g. EXTRA="--deck 5,3 --template limit --limit-pots lines --per-flop 20"
+$PY -m bombpot.experiments.valuenet.datagen --n "$N" --seed "$TASK" --tol "$TOL" --out "$LOCAL" --log-every "${LOG:-5}" ${EXTRA:-}
 cp "$LOCAL" "$OUT/shard_$(printf %04d "$TASK").h5" && rm -f "$LOCAL"

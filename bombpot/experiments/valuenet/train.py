@@ -4,8 +4,10 @@
         [--run NAME] [--data DIR] [--device cuda|cpu|auto] [--epochs N] [--max-minutes M] [--synthetic]
 
 Loss: Huber (delta `train.huber_delta`, in pots) on the per-bin values of both players,
-weighted by each bin's range mass (data.py), normalized by the total mass of the batch: a
-mass-weighted mean over bins, in pots. Adam, cosine or step learning rate. Held-out samples
+weighted by each bin's range mass (data.py; or, with data.weight "hands", by its share of the
+possible hands), normalized by the total weight of the batch: a weighted mean over bins, in
+pots. data.target picks the per-hand values behind the bin targets: "cfv" (the solved
+profile's) or "br" (best-response values). Adam, cosine or step learning rate. Held-out samples
 are whole flop pairs (data.holdout_fraction).
 
 Each epoch logs to results/valuenet/net/<run>/log.csv:
@@ -40,7 +42,7 @@ from bombpot.experiments.run import RESULTS, ROOT, git_info
 
 NET = RESULTS / "valuenet" / "net"
 DEFAULTS = {
-    "data": {"dir": None, "holdout_fraction": 0.2, "block": 512, "salt": "valuenet-split"},
+    "data": {"dir": None, "holdout_fraction": 0.2, "block": 512, "salt": "valuenet-split", "target": "cfv", "weight": "range"},
     "features": {"method": "joint_2d", "n_bins": 20, "board": "onehot", "num_ranks": 13, "num_suits": 4},
     "model": {"depth": 7, "width": 500, "zero_sum": True},
     "train": {"epochs": 50, "batch_size": 1024, "lr": 1e-3, "weight_decay": 0.0, "schedule": "cosine",
@@ -71,7 +73,7 @@ def weighted_huber(pred, target, weight, delta: float):
 def to_torch(batch: dict, device, board_ids: bool):
     import torch
 
-    t = {k: torch.as_tensor(batch[k], device=device) for k in ("scalars", "h0", "h1", "t0", "t1")}
+    t = {k: torch.as_tensor(batch[k], device=device) for k in ("scalars", "h0", "h1", "t0", "t1", "w0", "w1")}
     t["board"] = torch.as_tensor(batch["board"], device=device)
     if not board_ids:
         t["board"] = t["board"].float()
@@ -91,8 +93,8 @@ def evaluate(model, shards, split: str, device, delta: float, batch_size: int) -
             t = to_torch(batch, device, model.features.board == "ids")
             v = model(t["board"], t["scalars"], t["h0"], t["h1"])
             for p in (0, 1):
-                l, w = weighted_huber(v[p], t[f"t{p}"], t[f"h{p}"], delta)
-                z, _ = weighted_huber(torch.zeros_like(v[p]), t[f"t{p}"], t[f"h{p}"], delta)
+                l, w = weighted_huber(v[p], t[f"t{p}"], t[f"w{p}"], delta)
+                z, _ = weighted_huber(torch.zeros_like(v[p]), t[f"t{p}"], t[f"w{p}"], delta)
                 sums["loss"] += l.item()
                 sums["zero"] += z.item()
                 sums["w"] += w.item()
@@ -131,7 +133,7 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
     device = pick_device(tc["device"])
     fcfg = FeatureConfig(**cfg["features"])
     shards = ShardSet(cfg["data"]["dir"], fcfg, cfg["data"]["holdout_fraction"], cfg["data"]["block"],
-                      cfg["data"]["salt"])
+                      cfg["data"]["salt"], cfg["data"]["target"], cfg["data"]["weight"])
     n_train, n_held = shards.count("train"), shards.count("heldout")
     if n_held == 0 or n_train == 0:
         raise ValueError(f"split has {n_train} training and {n_held} held-out samples")
@@ -166,8 +168,8 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
             for batch in shards.batches("train", bs, rng, tc["buffer_blocks"]):
                 t = to_torch(batch, device, fcfg.board == "ids")
                 v = model(t["board"], t["scalars"], t["h0"], t["h1"])
-                l0, w0 = weighted_huber(v[0], t["t0"], t["h0"], delta)
-                l1, w1 = weighted_huber(v[1], t["t1"], t["h1"], delta)
+                l0, w0 = weighted_huber(v[0], t["t0"], t["w0"], delta)
+                l1, w1 = weighted_huber(v[1], t["t1"], t["w1"], delta)
                 loss = (l0 + l1) / (w0 + w1).clamp_min(1e-12)
                 opt.zero_grad(set_to_none=True)
                 loss.backward()

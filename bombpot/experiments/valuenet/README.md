@@ -58,6 +58,7 @@ row sample n uses: hand i of sample n is `hands[hand_set[n], i]`. Every per-hand
 | `pot` | (N,) | float32 | P, chips in the pot at the start of the river (P/2 from each player) |
 | `stack` | (N,) | float32 | chips **behind** for each player at the start of the river (101 - P/2) |
 | `cfv0`, `cfv1` | (N, H) | float32 | root counterfactual values of the average strategy, **in pots** (below) |
+| `br0`, `br1` | (N, H) | float32 | each hand's best-response root value against the opponent's average strategy, in pots (`br >= cfv`; equal up to the tolerance on hands the range holds). The values a leaf must hand out: right for hands with little or no range too (gate C1, 2026-11-12). Shards written before 2026-11-12 lack them |
 | `zero_sum_residual` | (N,) | float32 | range0 . cfv0 + range1 . cfv1 (computed in float64; 0 up to rounding) |
 | `subgame_exploitability` | (N,) | float32 | the solved subgame's exploitability, in pots |
 | `iters` | (N,) | int32 | solver iterations used |

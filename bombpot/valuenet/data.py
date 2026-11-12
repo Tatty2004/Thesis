@@ -8,6 +8,7 @@ Shard layout (experiments/valuenet/README.md is the authority; N samples, H hand
   equity (N, H, 2) float32                turn-end equity on board A and B vs a uniform range
   pot, stack (N,) float32                 chips in the pot, chips behind (each)
   cfv0, cfv1 (N, H) float32               root counterfactual values in pots
+  br0, br1 (N, H) float32                 best-response root values in pots (target: "br")
   subgame_exploitability (N,) float32, iters (N,) int
 
 Targets. The network predicts one value per equity bin and player. A bin's target is the
@@ -73,18 +74,30 @@ def heldout_mask(flops: np.ndarray, fraction: float, salt: str = "valuenet-split
     return flop_pair_hash(flops, salt, num_suits) < fraction
 
 
-def featurize(raw: dict, cfg: FeatureConfig) -> dict:
+def featurize(raw: dict, cfg: FeatureConfig, target: str = "cfv", weight: str = "range") -> dict:
     """Raw shard rows (FIELDS) -> network inputs, bin targets and weights:
     board, scalars, h0, h1, t0, t1 (float32, (n, B) for the bin arrays), plus bins (n, H)
-    and the raw ranges and values, for the per-hand error."""
+    and the raw ranges and values, for the per-hand error. `target` names the per-hand
+    values the bins average: "cfv" (the solved profile's) or "br" (best-response values);
+    either way they come back as cfv0 / cfv1. `weight` says how a bin's hands are averaged
+    and how much the bin counts in the loss (w0, w1): "range" (by the player's range mass,
+    the module docstring's targets) or "hands" (every possible hand the same, whatever the
+    player's range: the bin's target is the plain mean over its possible hands and its weight
+    their share of the possible hands; `raw` then needs `possible`). The inputs h0, h1 are the
+    range histograms either way. With "hands" a bin the player's range leaves empty is still
+    trained, which a solver needs: it asks what a hand would be worth if it came here."""
     boards = np.concatenate([raw["flops"], raw["turn"][..., None]], axis=-1)
     bins = bin_index(raw["equity"], cfg)
     B = cfg.num_bins
     out = {"board": encode_boards(boards, cfg), "scalars": pot_features(raw["pot"], raw["stack"]), "bins": bins}
     for p in (0, 1):
-        r, v = raw[f"range{p}"], raw[f"cfv{p}"]
+        r, v = raw[f"range{p}"], raw[f"{target}{p}"]
         t, h = bin_means(v, r, bins, B)
-        out[f"h{p}"], out[f"t{p}"] = h.astype(np.float32), t.astype(np.float32)
+        w = h
+        if weight == "hands":
+            poss = np.asarray(raw["possible"], dtype=np.float64)
+            t, w = bin_means(v, poss / np.maximum(poss.sum(-1, keepdims=True), 1.0), bins, B)
+        out[f"h{p}"], out[f"t{p}"], out[f"w{p}"] = h.astype(np.float32), t.astype(np.float32), w.astype(np.float32)
         out[f"range{p}"], out[f"cfv{p}"] = r.astype(np.float32), v.astype(np.float32)
     return out
 
@@ -97,10 +110,17 @@ class ShardSet:
     and I/O stays block-oriented."""
 
     def __init__(self, directory, cfg: FeatureConfig, holdout_fraction: float = 0.1, block: int = 512,
-                 salt: str = "valuenet-split"):
+                 salt: str = "valuenet-split", target: str = "cfv", weight: str = "range"):
         import h5py
 
-        self.cfg, self.block = cfg, block
+        if target not in ("cfv", "br"):
+            raise ValueError(f"unknown target {target!r}")
+        if weight not in ("range", "hands"):
+            raise ValueError(f"unknown weight {weight!r}")
+        self.cfg, self.block, self.target, self.weight = cfg, block, target, weight
+        self.fields = tuple(k for k in FIELDS if not k.startswith("cfv")) + (f"{target}0", f"{target}1")
+        if weight == "hands":
+            self.fields += ("possible",)
         self.paths = sorted(Path(directory).glob("*.h5"))
         if not self.paths:
             raise FileNotFoundError(f"no *.h5 shards in {directory}")
@@ -129,8 +149,8 @@ class ShardSet:
             keep = np.ones_like(keep)
         if not keep.any():
             return None
-        raw = {k: f[k][a:b][keep] for k in FIELDS}
-        return featurize(raw, self.cfg)
+        raw = {k: f[k][a:b][keep] for k in self.fields}
+        return featurize(raw, self.cfg, self.target, self.weight)
 
     def batches(self, split: str, batch_size: int, rng: np.random.Generator | None = None, buffer: int = 8):
         """Featurized batches. With `rng`: blocks in random order, `buffer` blocks at a time

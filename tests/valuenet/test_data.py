@@ -75,3 +75,35 @@ def test_split_respects_suit_isomorphism():
     assert flop_pair_key(*a) != flop_pair_key(*c)
     flops = np.array([[a[0], a[1]], [b[1], b[0]]])
     assert heldout_mask(flops, 0.5)[0] == heldout_mask(flops, 0.5)[1]
+
+
+def test_hands_weighting_trains_bins_the_range_leaves_empty():
+    # weight="hands": a bin's target is the plain mean of its possible hands' values and its
+    # weight their share of the possible hands, whatever the player's range; the inputs stay
+    # the range histograms.
+    from bombpot.valuenet.data import featurize
+    from bombpot.valuenet.features import bin_index
+
+    rng = np.random.default_rng(0)
+    n, H = 6, 36
+    cfg = FeatureConfig("avg_1d", 5, num_ranks=5, num_suits=3)
+    possible = rng.random((n, H)) > 0.2
+    equity = rng.random((n, H, 2)) * possible[..., None]
+    raw = {"flops": np.tile(np.array([[0, 3, 7], [6, 9, 13]]), (n, 1, 1)), "turn": np.tile(np.array([1, 2]), (n, 1)),
+           "equity": equity, "pot": np.full(n, 6.0), "stack": np.full(n, 98.0), "possible": possible}
+    for p in (0, 1):
+        r = rng.random((n, H)) * possible * (rng.random((n, H)) > 0.5)  # half the possible hands have no range
+        raw[f"range{p}"] = r / r.sum(-1, keepdims=True)
+        raw[f"br{p}"] = rng.standard_normal((n, H)) * possible
+    a = featurize(raw, cfg, "br", "range")
+    b = featurize(raw, cfg, "br", "hands")
+    bins = bin_index(equity, cfg)
+    for p in (0, 1):
+        assert np.array_equal(a[f"h{p}"], b[f"h{p}"]) and np.array_equal(a[f"w{p}"], a[f"h{p}"])
+        assert np.allclose(b[f"w{p}"].sum(-1), 1, atol=1e-6)
+        for s in range(n):
+            for k in range(cfg.num_bins):
+                m = possible[s] & (bins[s] == k)
+                assert b[f"w{p}"][s, k] == pytest.approx(m.sum() / possible[s].sum(), abs=1e-6)
+                if m.any():
+                    assert b[f"t{p}"][s, k] == pytest.approx(raw[f"br{p}"][s][m].mean(), abs=1e-5)

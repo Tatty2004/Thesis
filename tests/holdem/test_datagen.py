@@ -160,3 +160,19 @@ def test_fused_solver_gives_the_same_rows_as_the_subgame_solver(template):
     assert np.abs(c["cfv0"] - a["cfv0"]).max() < 0.05 and np.abs(c["cfv1"] - a["cfv1"]).max() < 0.05
     with pytest.raises(ValueError):
         solve_sample(fp, s, rng, tol=1e-3, iters=10, solver="subgame", dtype="float32")
+
+
+def test_best_response_values_are_stored_and_bound_the_profile_values():
+    # br_p[i] >= cfv_p[i] for every hand, and the range-weighted gap is the exploitability
+    # (README: range0 . br0 + range1 . br1 = 2 x subgame_exploitability x mass).
+    rng = np.random.default_rng(5)
+    s = sample_spot(rng, 5, 3)
+    fp = FlopPair(s["flops"], 5, 3, "limit", "lines")
+    s.update(fp.sample_betting(rng, 1.5))
+    assert s["pot"] / s["pot_spread"] in set((2 * fp.upper.classes[2][0].contrib).tolist())
+    row = solve_sample(fp, s, rng, tol=1e-3, iters=2000, variant="dcfr")
+    for p in (0, 1):
+        assert (row[f"br{p}"] >= row[f"cfv{p}"] - 1e-12).all()
+        assert (row[f"br{p}"][~row["possible"]] == 0).all()
+    total = row["range0"] @ row["br0"] + row["range1"] @ row["br1"]
+    assert total == pytest.approx(2 * row["subgame_exploitability"] * row["mass"], rel=1e-9, abs=1e-14)
