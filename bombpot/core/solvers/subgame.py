@@ -221,6 +221,18 @@ class ExactRiverLeaf:
     last           a last-street provider: last.street(parents, children) and
                    last.all_children(parents), as for sampled_cfr
 
+    Which root values (`values`): "br" (default) gives each hand its best-response value
+    against the opponent's solved strategy; "average" the value of the solved profile. For the
+    street above, a hand's leaf value must be what the hand can get against the opponent's
+    river strategy, whether or not the player brings that hand here now: the regret of not
+    coming is measured against it (CFR-D, Burch et al. 2014, counts the subgame's
+    counterfactual regret at every root infoset). The best-response value is that for every
+    hand at once, and differs from the profile's value by at most 2 x the subgame's
+    exploitability_raw summed over the hands weighted by their root reach, which is what the
+    "total" tolerance bounds. The profile's value is only as good for a hand as that hand's own
+    average strategy, which for hands with little or no root reach converges at the slow rate
+    of plain regret minimization (criterion "cfv" bounds it, at many times the iterations).
+
     Tolerance: criterion "total" (default) stops each class's batch when its summed
     exploitability_raw is <= tol / (classes with betting), so the leaf's error in chips of the
     whole game (with the game's chance weights) is at most tol; "max" when every subgame is
@@ -229,7 +241,10 @@ class ExactRiverLeaf:
     (the three passes of one evaluation). `stats` collects each call's iterations and errors."""
 
     def __init__(self, pt, last, tol, classes_last=None, variant: str = "cfr+", iters: int = 10_000,
-                 check_every: int = 10, criterion: str = "total"):
+                 check_every: int = 10, criterion: str = "total", values: str = "br"):
+        if values not in ("br", "average"):
+            raise ValueError(f"unknown values {values!r}")
+        self.kind = values
         self.pt = pt
         self.classes = pt.classes[pt.num_streets] if classes_last is None else classes_last
         self.tol, self.variant, self.iters, self.check_every = tol, variant, iters, check_every
@@ -278,11 +293,16 @@ class ExactRiverLeaf:
         in the full tree's layout (the deals in last.all_children order)."""
         return [s.strategy for s in self.solve(closing)]
 
+    def root_values(self, sub, p: int) -> np.ndarray:
+        """Player p's root values of a solved batch, (D, L_c, H): the kind this leaf hands out."""
+        return sub.br_values[p] if self.kind == "br" else sub.values[p]
+
     def values(self, p: int, t: int, closing) -> list:
         subs = self.solve(closing)
         agg = [np.zeros(c[p].shape) for c in closing]
         for lc, sub in zip(self.classes, subs):
+            v = self.root_values(sub, p)
             for pc in np.unique(lc.parent_class):
                 m = np.flatnonzero(lc.parent_class == pc)
-                agg[pc][:, lc.parent_line[m], lc.parent_close[m]] = sub.values[p][:, m]
+                agg[pc][:, lc.parent_line[m], lc.parent_close[m]] = v[:, m]
         return agg

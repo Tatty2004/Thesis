@@ -123,11 +123,14 @@ def test_range_cfr_with_a_replayed_river(name):
 @pytest.mark.parametrize("name", GAMES)
 def test_exact_leaf_equals_separate_subgames(name):
     full, upper, river = built(name)
-    leaf = ExactRiverLeaf(upper, river, tol=None, iters=30)
     hsig = random_hsig(upper, 3)
     _, closing = forward(upper, hsig, closing=True)
-    got = [leaf.values(p, 1, closing) for p in (0, 1)]
-    assert len(leaf.stats) == 1  # the second player's call reuses the same solve
+    got = {}
+    for kind in ("br", "average"):  # the best-response root values (the default), or the profile's
+        leaf = ExactRiverLeaf(upper, river, tol=None, iters=30, values=kind)
+        got[kind] = [leaf.values(p, 1, closing) for p in (0, 1)]
+        assert len(leaf.stats) == 1  # the second player's call reuses the same solve
+    assert ExactRiverLeaf(upper, river, tol=None).kind == "br"
     rng = np.random.default_rng(4)
     for rc in full.classes[2]:  # a few river lines of every river class
         for m in rng.choice(rc.num_lines, size=min(2, rc.num_lines), replace=False):
@@ -137,7 +140,8 @@ def test_exact_leaf_equals_separate_subgames(name):
             sub = solve_subgame(st, line_template(rc.template, m), rc.contrib[m], closing[pc][0][d, pl, pj],
                                 closing[pc][1][d, pl, pj], iters=30)
             for p in (0, 1):
-                np.testing.assert_allclose(got[p][pc][d, pl, pj], sub.values[p], rtol=1e-12, atol=1e-20)
+                np.testing.assert_allclose(got["average"][p][pc][d, pl, pj], sub.values[p], rtol=1e-12, atol=1e-20)
+                np.testing.assert_allclose(got["br"][p][pc][d, pl, pj], sub.br_values[p], rtol=1e-12, atol=1e-20)
     # every closing line got a value: the river classes cover the turn's closes
     covered = [np.zeros(c[0].shape[1:3], dtype=bool) for c in closing]
     for rc in full.classes[2]:
