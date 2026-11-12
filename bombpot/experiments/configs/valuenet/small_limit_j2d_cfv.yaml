@@ -1,0 +1,31 @@
+# Gate F on the small deck's limit game (experiments/valuenet/gate_f.py): joint_2d bins, targets
+# "cfv" weighted by "range". Shards: 20 x 10,000 samples of the 5 x 3 deck, limit river, the
+# game's own river pots x a spread of 1.5, tol 1e-4 pots (results/valuenet/data/small_limit).
+# The salt holds the gate's flop pair (2c3c4d / 5c6d4c) out of training.
+#   sbatch scripts/ionic/valuenet_gate_f.sbatch small_limit_j2d_cfv
+data:
+  dir: results/valuenet/data/small_limit
+  holdout_fraction: 0.2
+  block: 1024
+  salt: small-limit-0
+  target: cfv
+  weight: range
+features:
+  method: joint_2d
+  n_bins: 10
+  board: onehot
+  num_ranks: 5
+  num_suits: 3
+model:
+  depth: 7
+  width: 500
+  zero_sum: true
+train:
+  epochs: 100
+  batch_size: 1024
+  lr: 0.001
+  schedule: cosine
+  huber_delta: 1.0
+  seed: 0
+  threads: 16
+  device: cpu

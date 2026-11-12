@@ -61,36 +61,42 @@ def main():
             for tol in tols:
                 if tol not in got and expl <= tol:
                     got[tol] = {"iters": int(f.t[0]), "expl": expl, "seconds": f.seconds,
-                                "cfv": [ev["values"][0][p] / pot for p in (0, 1)]}
+                                "cfv": [ev["values"][0][p] / pot for p in (0, 1)],
+                            "br": [ev["br_values"][0][p] / pot for p in (0, 1)]}
         if a.ref not in got:
             print(f"sample {n}: reference tolerance {a.ref:g} not reached in {a.iters} iterations "
                   f"(at {expl:.2e}); using the last iterate", flush=True)
             got[a.ref] = {"iters": int(f.t[0]), "expl": expl, "seconds": f.seconds,
-                          "cfv": [ev["values"][0][p] / pot for p in (0, 1)]}
+                          "cfv": [ev["values"][0][p] / pot for p in (0, 1)],
+                            "br": [ev["br_values"][0][p] / pot for p in (0, 1)]}
         ref = got[a.ref]
         scale = max(np.abs(ref["cfv"][p][valid]).max() for p in (0, 1))
         for tol in tols:
             g = got[tol]
             diff = [np.abs(g["cfv"][p] - ref["cfv"][p]) for p in (0, 1)]
+            dbr = [np.abs(g["br"][p] - ref["br"][p]) for p in (0, 1)]  # the best-response values (br0/br1)
             row = {"sample": n, "pot": pot, "nodes": spot["template"].num_nodes, "tol": tol, "iters": g["iters"],
                    "expl": g["expl"], "kernel_seconds": g["seconds"],
                    "max": float(max(x[valid].max() for x in diff)),
                    "rms": float(np.sqrt(np.mean(np.concatenate([x[valid] for x in diff]) ** 2))),
                    "wmean": float(np.mean([r[p] @ diff[p] for p in (0, 1)])), "ref_abs_max": float(scale),
+                   "br_max": float(max(x[valid].max() for x in dbr)),
+                   "br_rms": float(np.sqrt(np.mean(np.concatenate([x[valid] for x in dbr]) ** 2))),
                    "ref_wmean_abs": float(np.mean([r[p] @ np.abs(ref["cfv"][p]) for p in (0, 1)]))}
             rows.append(row)
             print(f"sample {n} pot {pot:6.2f} nodes {row['nodes']:2d} tol {tol:7.0e}  iters {row['iters']:5d}  expl "
-                  f"{row['expl']:.2e}  max {row['max']:.2e}  rms {row['rms']:.2e}  wmean {row['wmean']:.2e}  "
+                  f"{row['expl']:.2e}  max {row['max']:.2e}  rms {row['rms']:.2e}  wmean {row['wmean']:.2e}  br max {row['br_max']:.2e} rms {row['br_rms']:.2e}  "
                   f"(|ref| max {scale:.2f}, weighted {row['ref_wmean_abs']:.3f})  {time.perf_counter() - start:.0f}s",
                   flush=True)
-    print("\ntol      iters(mean)  cost/1e-3  max(mean / worst)      rms(mean)   wmean(mean / worst)")
+    print("\ntol      iters(mean)  cost/1e-3  max(mean / worst)      rms(mean)   wmean(mean / worst)   br rms(mean)  br max(worst)")
     base = np.mean([x["iters"] for x in rows if x["tol"] == 1e-3]) if 1e-3 in tols else np.nan
     for tol in tols:
         sel = [x for x in rows if x["tol"] == tol]
         it = np.mean([x["iters"] for x in sel])
         print(f"{tol:7.0e}  {it:10.1f}  {it / base:9.2f}  {np.mean([x['max'] for x in sel]):.2e} / "
               f"{max(x['max'] for x in sel):.2e}  {np.mean([x['rms'] for x in sel]):.2e}    "
-              f"{np.mean([x['wmean'] for x in sel]):.2e} / {max(x['wmean'] for x in sel):.2e}")
+              f"{np.mean([x['wmean'] for x in sel]):.2e} / {max(x['wmean'] for x in sel):.2e}   "
+              f"{np.mean([x['br_rms'] for x in sel]):.2e}      {max(x['br_max'] for x in sel):.2e}")
     if a.out:
         with open(a.out, "w") as fh:
             json.dump(rows, fh, indent=1)

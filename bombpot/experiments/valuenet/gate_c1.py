@@ -172,14 +172,14 @@ class CFRDSolver(SimultaneousCFR):
         return out
 
 
-def deepstack_grade(full, upper, solver, tol, iters, variant="dcfr"):
+def deepstack_grade(full, upper, solver, tol, iters, variant="dcfr", geom=None):
     """DeepStack-style grading: every river re-solved safely (resolve_batch with the gadget),
     for each player p separately, from the trunk average's closing reach of p, with the
     opponent's T values its averaged leaf root values (CFRDSolver.cfv_average); node k of each
     river class plays the re-solve of its acting player. Exact exploitability on the full tree."""
     from bombpot.core.solvers.resolve import resolve_batch
 
-    leaf = solver.leaf
+    leaf = solver.leaf if geom is None else geom  # geom: an ExactRiverLeaf for the river's layout (gate_f)
     avg = solver.hand_sigma(solver.average_strategy())
     _, closing = forward(upper, avg, closing=True)
     D1 = upper.streets[-1].num_deals
