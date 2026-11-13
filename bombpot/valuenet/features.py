@@ -7,6 +7,9 @@ board:
 
   avg_1d    n bins over the mean of the two equities              (n_bins bins)
   joint_2d  an n x n grid over (equity A, equity B), A major       (n_bins**2 bins)
+  hand      every hand its own bin (n_bins = H): the range itself, no abstraction. Only
+            meaningful for samples that share one hand list (one flop pair): the reference
+            that separates what binning costs from what the network costs
 
 Bin b of method avg_1d holds equities in [b/n, (b+1)/n), the last bin also holds 1.0.
 
@@ -23,7 +26,7 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-METHODS = ("avg_1d", "joint_2d")
+METHODS = ("avg_1d", "joint_2d", "hand")
 BOARDS = ("onehot", "ids", "none")
 
 
@@ -55,7 +58,7 @@ class FeatureConfig:
 
     @property
     def num_bins(self) -> int:
-        return self.n_bins if self.method == "avg_1d" else self.n_bins ** 2
+        return self.n_bins if self.method in ("avg_1d", "hand") else self.n_bins ** 2
 
     @property
     def num_cards(self) -> int:
@@ -97,6 +100,10 @@ def bin_index(equity: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
     """(..., H, 2) equities -> (..., H) bin of each hand."""
     equity = np.asarray(equity)
     n = cfg.n_bins
+    if cfg.method == "hand":  # every hand its own bin (n_bins = H): no abstraction, one hand list only
+        if equity.shape[-2] != n:
+            raise ValueError(f"method 'hand' needs n_bins = the number of hands ({equity.shape[-2]})")
+        return np.broadcast_to(np.arange(n), equity.shape[:-1]).copy()
     if cfg.method == "avg_1d":
         return _axis(np.asarray(equity, dtype=np.float32).astype(np.float64).mean(axis=-1), n)
     return _axis(equity[..., 0], n) * n + _axis(equity[..., 1], n)
