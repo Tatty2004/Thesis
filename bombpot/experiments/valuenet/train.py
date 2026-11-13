@@ -47,7 +47,7 @@ DEFAULTS = {
     "model": {"depth": 7, "width": 500, "zero_sum": True},
     "train": {"epochs": 50, "batch_size": 1024, "lr": 1e-3, "weight_decay": 0.0, "schedule": "cosine",
               "step_size": 20, "gamma": 0.3, "huber_delta": 1.0, "seed": 0, "threads": 8, "device": "auto",
-              "max_minutes": None, "buffer_blocks": 8},
+              "max_minutes": None, "buffer_blocks": 8, "clip": None},
     "synthetic": {"shards": 4, "samples": 2000, "flop_pairs": 25, "noise": 0.02},
 }
 
@@ -173,6 +173,8 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
                 loss = (l0 + l1) / (w0 + w1).clamp_min(1e-12)
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
+                if tc["clip"]:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), tc["clip"])
                 opt.step()
                 tot += (l0 + l1).item()
                 wsum += (w0 + w1).item()
