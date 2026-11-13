@@ -155,7 +155,7 @@ def main(argv=None):
 
         data = yaml.safe_load(cfg_path.read_text())["data"]
         h = float(flop_pair_hash(np.array(game.flops)[None], data["salt"], model.features.num_suits)[0])
-        result["flop_pair_held_out"] = bool(h < data["holdout_fraction"])
+        result["flop_pair_held_out"] = bool(h < data["holdout_fraction"]) and data.get("split", "flop_pair") == "flop_pair"
         result["data"] = data
         print(f"flop pair {FLOPS}: {'held out of' if result['flop_pair_held_out'] else 'IN'} the training set", flush=True)
     out = Path(a.out)

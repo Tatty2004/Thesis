@@ -80,8 +80,17 @@ class FeatureConfig:
 # Equity bins ------------------------------------------------------------------------------
 
 
+EDGE = 1e-4  # see _axis
+
+
 def _axis(x: np.ndarray, n: int) -> np.ndarray:
-    return np.clip(np.floor(np.asarray(x) * n).astype(np.int64), 0, n - 1)
+    """Bin of each equity. Equities are small fractions, so many sit exactly on a bin edge
+    (0.3, 0.5), where float32 (the shards) and float64 (a solver's equities) round to
+    different sides: on the small deck 22% of the hands landed in another joint_2d bin at
+    solve time than in training. Equities are compared in float32 and an edge counts as
+    reached from EDGE / n below it, so both paths agree."""
+    x = np.asarray(x, dtype=np.float32).astype(np.float64)
+    return np.clip(np.floor(x * n + EDGE).astype(np.int64), 0, n - 1)
 
 
 def bin_index(equity: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
@@ -89,7 +98,7 @@ def bin_index(equity: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
     equity = np.asarray(equity)
     n = cfg.n_bins
     if cfg.method == "avg_1d":
-        return _axis(equity.mean(axis=-1), n)
+        return _axis(np.asarray(equity, dtype=np.float32).astype(np.float64).mean(axis=-1), n)
     return _axis(equity[..., 0], n) * n + _axis(equity[..., 1], n)
 
 

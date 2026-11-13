@@ -314,6 +314,8 @@ def main(argv=None):
     ap.add_argument("--threads", type=int, default=None, help="numba threads (default: NUMBA_NUM_THREADS)")
     ap.add_argument("--deck", default="13,4", help="ranks,suits (default the real deck)")
     ap.add_argument("--per-flop", type=int, default=1, help="samples per flop pair (each with its own turn)")
+    ap.add_argument("--flops", default=None,
+                    help="one fixed flop pair for every sample, e.g. 2c3c4d,5c6d4c (default: random flop pairs)")
     ap.add_argument("--log-every", type=int, default=1)
     a = ap.parse_args(argv)
     num_ranks, num_suits = (int(x) for x in a.deck.split(","))
@@ -331,19 +333,27 @@ def main(argv=None):
              "ante": 1.0, "total_chips": STACK, "template": a.template, "spread": a.spread,
              "limit_pots": a.limit_pots, **betting,
              "tol_pots": a.tol, "iters_cap": a.iters,
-             "variant": a.variant, "solver": a.solver, "solver_dtype": a.dtype, "seed": a.seed, "git": git_hash(), "per_flop": a.per_flop,
+             "variant": a.variant, "solver": a.solver, "solver_dtype": a.dtype, "seed": a.seed, "flops_fixed": a.flops or "", "git": git_hash(), "per_flop": a.per_flop,
              "card_encoding": "card = rank * num_suits + suit, ranks 23456789TJQKA, suits cdhs", "units": UNITS}
+    fixed = None
+    if a.flops:
+        ranks, suits = "23456789TJQKA"[:num_ranks] if num_ranks < 13 else "23456789TJQKA", "cdhs"
+        fixed = tuple(tuple(sorted(ranks.index(f[i]) * num_suits + suits.index(f[i + 1]) for i in (0, 2, 4)))
+                      for f in a.flops.split(","))
     shard = None
     start = time.perf_counter()
     fp = None
     for n in range(a.n):
         spot = sample_spot(rng, num_ranks, num_suits)
-        if n % a.per_flop == 0:
+        if fixed is not None:
+            rest = rng.permutation([c for c in range(num_ranks * num_suits) if c not in {x for f in fixed for x in f}])
+            spot = {"flops": fixed, "turn": (int(rest[0]), int(rest[1]))}
+        if (n % a.per_flop == 0 and fixed is None) or fp is None:
             fp = FlopPair(spot["flops"], num_ranks, num_suits, a.template, a.limit_pots)
             if shard is None:
                 shard = Shard(a.out, len(fp.hands), attrs)
             hand_set = shard.add_hands(fp.hands)
-        else:  # keep the flop pair, draw new turn cards from what's left
+        elif fixed is None:  # keep the flop pair, draw new turn cards from what's left
             used = {c for f in fp.game.flops for c in f}
             rest = rng.permutation([c for c in range(num_ranks * num_suits) if c not in used])
             spot["flops"], spot["turn"] = fp.game.flops, (int(rest[0]), int(rest[1]))

@@ -110,7 +110,11 @@ class ShardSet:
     and I/O stays block-oriented."""
 
     def __init__(self, directory, cfg: FeatureConfig, holdout_fraction: float = 0.1, block: int = 512,
-                 salt: str = "valuenet-split", target: str = "cfv", weight: str = "range"):
+                 salt: str = "valuenet-split", target: str = "cfv", weight: str = "range",
+                 split: str = "flop_pair"):
+        """split: "flop_pair" (whole isomorphism classes of flop pairs are held out; the
+        default) or "sample" (a random `holdout_fraction` of each shard's rows, fixed by the
+        salt and the shard's name: for shards of a single flop pair)."""
         import h5py
 
         if target not in ("cfv", "br"):
@@ -125,7 +129,15 @@ class ShardSet:
         if not self.paths:
             raise FileNotFoundError(f"no *.h5 shards in {directory}")
         self.files = [h5py.File(p, "r") for p in self.paths]
-        self.heldout = [heldout_mask(f["flops"][:], holdout_fraction, salt, cfg.num_suits) for f in self.files]
+        if split == "flop_pair":
+            self.heldout = [heldout_mask(f["flops"][:], holdout_fraction, salt, cfg.num_suits) for f in self.files]
+        elif split == "sample":
+            self.heldout = []
+            for path, f in zip(self.paths, self.files):
+                seed = int.from_bytes(hashlib.blake2b(f"{salt}:{path.name}".encode(), digest_size=8).digest(), "little")
+                self.heldout.append(np.random.default_rng(seed).random(len(f["pot"])) < holdout_fraction)
+        else:
+            raise ValueError(f"unknown split {split!r}")
 
     def close(self) -> None:
         for f in self.files:

@@ -42,7 +42,7 @@ from bombpot.experiments.run import RESULTS, ROOT, git_info
 
 NET = RESULTS / "valuenet" / "net"
 DEFAULTS = {
-    "data": {"dir": None, "holdout_fraction": 0.2, "block": 512, "salt": "valuenet-split", "target": "cfv", "weight": "range"},
+    "data": {"dir": None, "holdout_fraction": 0.2, "block": 512, "salt": "valuenet-split", "target": "cfv", "weight": "range", "split": "flop_pair"},
     "features": {"method": "joint_2d", "n_bins": 20, "board": "onehot", "num_ranks": 13, "num_suits": 4},
     "model": {"depth": 7, "width": 500, "zero_sum": True},
     "train": {"epochs": 50, "batch_size": 1024, "lr": 1e-3, "weight_decay": 0.0, "schedule": "cosine",
@@ -133,7 +133,7 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
     device = pick_device(tc["device"])
     fcfg = FeatureConfig(**cfg["features"])
     shards = ShardSet(cfg["data"]["dir"], fcfg, cfg["data"]["holdout_fraction"], cfg["data"]["block"],
-                      cfg["data"]["salt"], cfg["data"]["target"], cfg["data"]["weight"])
+                      cfg["data"]["salt"], cfg["data"]["target"], cfg["data"]["weight"], cfg["data"]["split"])
     n_train, n_held = shards.count("train"), shards.count("heldout")
     if n_held == 0 or n_train == 0:
         raise ValueError(f"split has {n_train} training and {n_held} held-out samples")
