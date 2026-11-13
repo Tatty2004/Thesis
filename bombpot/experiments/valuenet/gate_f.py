@@ -71,9 +71,10 @@ class Recording:
     """A leaf that remembers the last values it gave each player."""
 
     def __init__(self, leaf):
-        self.leaf, self.last = leaf, {}
+        self.leaf, self.last, self.closing = leaf, {}, {}
 
     def values(self, p: int, t: int, closing):
+        self.closing[p] = closing  # the ranges the leaf was asked about (onpolicy.py collects them)
         self.last[p] = self.leaf.values(p, t, closing)
         return self.last[p]
 
