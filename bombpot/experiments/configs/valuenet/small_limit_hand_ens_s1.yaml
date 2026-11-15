@@ -1,0 +1,37 @@
+data:
+  dir: /n/fs/ugrad/ug27/rb5709/Thesis/results/valuenet/data/small_limit_onepair_big
+  holdout_fraction: 0.2
+  block: 1024
+  salt: small-limit-0
+  target: cfv
+  weight: range
+  split: sample
+features:
+  method: hand
+  n_bins: 36
+  board: onehot
+  num_ranks: 5
+  num_suits: 3
+model:
+  depth: 7
+  width: 1000
+  zero_sum: true
+train:
+  epochs: 200
+  batch_size: 1024
+  lr: 0.001
+  weight_decay: 0.0
+  schedule: cosine
+  step_size: 20
+  gamma: 0.3
+  huber_delta: 1.0
+  seed: 1
+  threads: 16
+  device: cpu
+  max_minutes: null
+  buffer_blocks: 8
+synthetic:
+  shards: 4
+  samples: 2000
+  flop_pairs: 25
+  noise: 0.02
