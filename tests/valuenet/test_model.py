@@ -59,3 +59,28 @@ def test_save_load_round_trip(tmp_path):
     with torch.no_grad():
         for a, b in zip(model.eval()(*x), back(*x)):
             assert torch.equal(a, b)
+
+
+def test_ensemble_mean_zero_sum_and_load(tmp_path):
+    from bombpot.valuenet.model import Ensemble, load_ensemble
+
+    cfg = FeatureConfig("avg_1d", 12)
+    nets = []
+    for k in range(3):
+        torch.manual_seed(k)
+        nets.append(ValueNet(cfg, ModelConfig(depth=2, width=16)).double())
+    board, scal, h0, h1 = (x.double() for x in inputs(cfg, 32))
+    outs = [m(board, scal, h0, h1) for m in nets]
+    v0, v1 = Ensemble(nets)(board, scal, h0, h1)
+    assert torch.allclose(v0, sum(o[0] for o in outs) / 3) and torch.allclose(v1, sum(o[1] for o in outs) / 3)
+    assert ((h0 * v0).sum(-1) + (h1 * v1).sum(-1)).abs().max().item() < 1e-12
+    paths = []
+    for k, m in enumerate(nets):
+        paths.append(tmp_path / f"m{k}.pt")
+        save_model(paths[-1], m.float(), seed=k)
+    ens = load_ensemble(paths)
+    assert ens.features == cfg and [i["seed"] for i in ens.info["ensemble"]] == [0, 1, 2]
+    w0, w1 = ens(board.float(), scal.float(), h0.float(), h1.float())
+    assert torch.allclose(w0.double(), v0, atol=1e-5)
+    with pytest.raises(ValueError):
+        Ensemble([nets[0], ValueNet(FeatureConfig("avg_1d", 8), ModelConfig(depth=2, width=16))])

@@ -20,6 +20,8 @@ regrets see).
     python -m bombpot.experiments.valuenet.gate_f --model results/valuenet/net/<run>/best.pt \
         --iters 200 --checks 50,100,200 --out results/valuenet/net/<run>/gate_f.json
 
+--model takes several best.pt files for an ensemble (the mean of their values).
+
 Needs torch (the scratch environment).
 """
 from __future__ import annotations
@@ -128,7 +130,8 @@ def leaf_error(upper, river, net, hsig, tol: float, iters: int, variant: str) ->
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--model", required=True, help="a saved ValueNet (best.pt)")
+    ap.add_argument("--model", required=True, nargs="+",
+                    help="a saved ValueNet (best.pt); several: their mean (model.Ensemble)")
     ap.add_argument("--iters", type=int, default=200)
     ap.add_argument("--checks", default="50,100,200")
     ap.add_argument("--trunk", default="dcfr", choices=["cfr", "cfr+", "dcfr"])
@@ -139,17 +142,17 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     from bombpot.valuenet.data import flop_pair_hash
-    from bombpot.valuenet.model import load_model
+    from bombpot.valuenet.model import load_ensemble, load_model
 
     checks = sorted({int(x) for x in a.checks.split(",")} | {a.iters})
     game = make_game("limit")
     full = holdem_public_tree(game)
     upper = holdem_public_tree(game, upto=2)
     river = HoldemRiver(game, upper)
-    model = load_model(a.model, a.device)
+    model = load_model(a.model[0], a.device) if len(a.model) == 1 else load_ensemble(a.model, a.device)
     net = net_leaf(model, game, upper, river, a.device)
     geom = ExactRiverLeaf(upper, river, a.resolve_tol)  # the river's layout, for the re-solves
-    cfg_path = Path(a.model).with_name("config.yaml")
+    cfg_path = Path(a.model[0]).with_name("config.yaml")
     result = {"args": vars(a), "flops": FLOPS, "features": model.features.to_dict(), "model_info": model.info, "checks": {}}
     if cfg_path.exists():
         import yaml
