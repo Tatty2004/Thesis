@@ -198,7 +198,7 @@ def turn_equity(st) -> np.ndarray:
 
 
 def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant: str = "cfr+",
-                 solver: str = "fused", dtype: str = "float64") -> dict:
+                 solver: str = "fused", dtype: str = "float64", device: str = "cuda") -> dict:
     """One sample: ranges, equity and the solved subgame (values and exploitability in pots).
     spot holds turn, template, pot and stack (sample_spot, then FlopPair.sample_betting).
     solver "fused" (core/solvers/fused.py: one compiled kernel per deal; in float64 the same
@@ -213,6 +213,13 @@ def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant:
     if solver == "fused":
         sub = solve_subgame_fused(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, dtype=dtype,
                                   keep_strategy=False)
+    elif solver == "gpu":  # the torch solver on a GPU (valuenet/gpu_subgame.py); torch is imported here only
+        import torch
+
+        from bombpot.valuenet.gpu_subgame import solve_subgame_gpu
+
+        sub = solve_subgame_gpu(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot,
+                                dtype=getattr(torch, dtype), device=device)
     elif solver == "subgame" and dtype == "float64":
         sub = solve_subgame(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
     else:
@@ -306,11 +313,13 @@ def main(argv=None):
                     help="limit template: pot log-uniform on [2, 200], or a real river line's pot x the spread")
     ap.add_argument("--variant", default="dcfr", choices=["cfr+", "dcfr"],
                     help="subgame solver (DCFR: 2.9x faster than CFR+ to 1e-3 pots on the real deck)")
-    ap.add_argument("--solver", default="fused", choices=["fused", "subgame"],
+    ap.add_argument("--device", default="cuda", help="solver gpu: the torch device")
+    ap.add_argument("--solver", default="fused", choices=["fused", "subgame", "gpu"],
                     help="fused: one compiled kernel per river deal (core/solvers/fused.py), the same numbers "
-                         "as subgame in float64; subgame: the batched range-solver passes")
+                         "as subgame in float64; subgame: the batched range-solver passes; gpu: the same "
+                         "algorithm in torch on --device (valuenet/gpu_subgame.py; use --dtype float32)")
     ap.add_argument("--dtype", default="float64", choices=["float64", "float32"],
-                    help="solver precision (float32: fused only; values agree to rounding, not bit for bit)")
+                    help="solver precision (float32: fused and gpu; values agree to rounding, not bit for bit)")
     ap.add_argument("--threads", type=int, default=None, help="numba threads (default: NUMBA_NUM_THREADS)")
     ap.add_argument("--deck", default="13,4", help="ranks,suits (default the real deck)")
     ap.add_argument("--per-flop", type=int, default=1, help="samples per flop pair (each with its own turn)")
@@ -359,7 +368,7 @@ def main(argv=None):
             spot["flops"], spot["turn"] = fp.game.flops, (int(rest[0]), int(rest[1]))
         spot.update(fp.sample_betting(rng, a.spread))
         t0 = time.perf_counter()
-        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.variant, a.solver, a.dtype)
+        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.variant, a.solver, a.dtype, a.device)
         row.update(flops=np.array(spot["flops"]), turn=np.array(spot["turn"]), hand_set=hand_set, pot=spot["pot"],
                    stack=spot["stack"], line=spot["line"], pot_spread=spot["pot_spread"],
                    seconds=time.perf_counter() - t0)
