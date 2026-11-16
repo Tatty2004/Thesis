@@ -24,6 +24,11 @@ Counterfactual values are linear in the opponent's reach, which is why step 4 is
 an exact network. kappa_by_deal[d] is the chance weight per hand pair at deal d (the caller's
 W[d, i, j] for compatible hands); the leaf returns equilibrium values in every mode.
 
+A network with per-hand inputs (model.HandSetNet, features.method "hand_set") needs the hand
+list too (`hands`): every hand is its own bin, step 2 is the identity, and the network also
+gets features.hand_features of each deal (its possible flag taken from possible_by_deal) and
+the hands' cards. Its batches are at most `model.chunk` samples.
+
 The caller (experiments/) supplies the equities, boards and possible hands from the game's
 code; this layer never imports a game.
 """
@@ -32,19 +37,20 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from bombpot.valuenet.features import bin_index, encode_boards, pot_features
+from bombpot.valuenet.features import bin_index, encode_boards, hand_cards, hand_features, pot_features
 
 
 class NetLeaf:
 
     def __init__(self, model, equity_by_deal, pot_by_line, stack_by_line, kappa_by_deal, device="cpu", *,
-                 boards_by_deal=None, possible_by_deal=None, batch_size: int = 32768):
+                 boards_by_deal=None, possible_by_deal=None, batch_size: int = 32768, hands=None):
         """model: a ValueNet (anything with .features and forward(board, scalars, h0, h1) ->
         (v0, v1) per bin, in pots). equity_by_deal (D, H, 2). pot_by_line, stack_by_line
         (L, closes) chips (pot, and chips behind each) at each turn-closing line, or a list of
         such per line class. kappa_by_deal (D,). boards_by_deal (D, 2, k) card ids, required
         unless the model's board encoding is "none". possible_by_deal (D, H) bool, default all
-        hands (then the caller must give impossible hands zero reach)."""
+        hands (then the caller must give impossible hands zero reach). hands (H, 2) card ids,
+        required by a network with per-hand inputs."""
         self.model = model.to(device).eval()
         self.cfg, self.device, self.batch_size = model.features, torch.device(device), batch_size
         params = list(model.parameters())
@@ -61,6 +67,15 @@ class NetLeaf:
             raise ValueError("boards_by_deal is required for board encoding " + repr(self.cfg.board))
         self.board = torch.as_tensor(encode_boards(np.asarray(boards_by_deal), self.cfg), device=self.device)
         self.kappa = np.asarray(kappa_by_deal, dtype=np.float64)
+        self.hx = self.hc = None
+        if getattr(model, "per_hand", False):
+            if hands is None or boards_by_deal is None:
+                raise ValueError("a network with per-hand inputs needs hands and boards_by_deal")
+            hx = hand_features(equity, hands, np.asarray(boards_by_deal), self.cfg)
+            hx[..., 2] = possible
+            self.hx = torch.as_tensor(hx, device=self.device)
+            self.hc = torch.as_tensor(hand_cards(hands), device=self.device)
+            self.batch_size = min(batch_size, getattr(model, "chunk", batch_size))
         self.pot, self.stack = pot_by_line, stack_by_line
 
     def values(self, p: int, t: int, closing):
@@ -93,7 +108,8 @@ class NetLeaf:
                 hists.append(h.to(self.dtype))
                 mass.append(m[:, 0])
             board = self.board[d] if self.cfg.board == "ids" else self.board[d].to(self.dtype)
-            v = self.model(board, scal[lc].to(self.dtype), hists[0], hists[1])[p]
+            hand = {} if self.hx is None else {"hx": self.hx[d], "hc": self.hc.expand(len(n), H, 2)}
+            v = self.model(board, scal[lc].to(self.dtype), hists[0], hists[1], **hand)[p]
             cfv = torch.gather(v.double(), 1, bins)
             scale = torch.as_tensor(pot.reshape(-1), device=self.device)[lc] * mass[1 - p] \
                 * torch.as_tensor(self.kappa, device=self.device)[d]

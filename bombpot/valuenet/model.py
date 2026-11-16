@@ -236,6 +236,9 @@ class Ensemble(nn.Module):
         self.members = nn.ModuleList(members)
         self.features = f
         self.info = {"ensemble": [getattr(m, "info", {}) for m in members]}
+        self.per_hand = getattr(members[0], "per_hand", False)
+        if hasattr(members[0], "chunk"):
+            self.chunk = members[0].chunk
 
     def forward(self, board, scalars, h0, h1, **hand):
         outs = [m(board, scalars, h0, h1, **hand) for m in self.members]

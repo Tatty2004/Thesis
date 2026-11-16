@@ -85,3 +85,49 @@ def test_batch_equals_per_item_loop(cfg):
         assert np.allclose(agg, want, rtol=1e-10, atol=1e-12)
         assert np.all(agg[2, 3, 1] == 0) if p == 0 else np.all(agg[1, 2, 0] == 0)  # opponent never here
         assert np.abs(agg[1, 2, 0]).max() > 0 if p == 0 else np.abs(agg[2, 3, 1]).max() > 0  # own reach 0: defined
+
+
+def test_per_hand_network_equals_per_item_loop():
+    """HandSetNet through NetLeaf: per-hand features of every deal, batches of model.chunk."""
+    from bombpot.valuenet.features import hand_cards, hand_features
+    from bombpot.valuenet.model import HandSetNet
+
+    cfg = FeatureConfig("hand_set", H, num_ranks=5, num_suits=3)
+    rng = np.random.default_rng(5)
+    flops = rng.permutation(15)[:6]
+    rest = np.setdiff1d(np.arange(15), flops)
+    iu = np.triu_indices(9, 1)
+    hands = np.stack([rest[iu[0]], rest[iu[1]]], -1)
+    turns = np.stack([rng.choice(rest, 2, replace=False) for _ in range(D)])
+    boards = np.concatenate([np.broadcast_to(flops.reshape(2, 3), (D, 2, 3)), turns[..., None]], -1)
+    possible = np.stack([~np.isin(hands, t).any(-1) for t in turns])
+    equity = rng.random((D, H, 2)) * possible[..., None]
+    reach = [rng.random((D, L, C, H)) ** 2 for _ in (0, 1)]
+    reach[0][1, 2, 0] = 0.0
+    pot = rng.uniform(2, 100, (L, C))
+    stack, kappa = 101 - pot / 2, rng.uniform(0.1, 1.0, D)
+    torch.manual_seed(0)
+    model = HandSetNet(cfg, ModelConfig(kind="set", depth=2, width=24)).double().eval()
+    model.chunk = 5
+    with pytest.raises(ValueError):
+        NetLeaf(model, equity, pot, stack, kappa, boards_by_deal=boards, possible_by_deal=possible)
+    leaf = NetLeaf(model, equity, pot, stack, kappa, boards_by_deal=boards, possible_by_deal=possible, hands=hands)
+    assert leaf.batch_size == 5
+    hc = torch.as_tensor(hand_cards(hands))[None]
+    for p in (0, 1):
+        agg = leaf.values(p, 1, tuple(reach))
+        want = np.zeros_like(agg)
+        for d in range(D):
+            hx = torch.as_tensor(hand_features(equity[d], hands, boards[d], cfg))[None]
+            assert np.array_equal(hx[0, :, 2].numpy() > 0, possible[d])
+            board = torch.as_tensor(encode_boards(boards[d], cfg))[None].double()
+            for l in range(L):
+                for c in range(C):
+                    n0, m0 = normalize(reach[0][d, l, c], possible[d])
+                    n1, m1 = normalize(reach[1][d, l, c], possible[d])
+                    scal = torch.as_tensor(pot_features(pot[l, c], stack[l, c])).double()[None]
+                    with torch.no_grad():
+                        v = model(board, scal, torch.as_tensor(n0)[None], torch.as_tensor(n1)[None], hx=hx, hc=hc)[p][0]
+                    m = (m0, m1)[1 - p]
+                    want[d, l, c] = np.where(possible[d], v.numpy() * pot[l, c] * m * kappa[d], 0.0)
+        assert np.allclose(agg, want, rtol=1e-9, atol=1e-12)
