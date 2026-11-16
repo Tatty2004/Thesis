@@ -1,0 +1,37 @@
+data:
+  dir: /n/fs/ugrad/ug27/rb5709/Thesis/results/valuenet/data/real_pilot_22k
+  holdout_fraction: 0.1
+  block: 250
+  salt: real-pilot-0
+  target: cfv
+  weight: range
+  split: sample
+features:
+  method: hand
+  n_bins: 1035
+  board: onehot
+  num_ranks: 13
+  num_suits: 4
+model:
+  depth: 7
+  width: 1000
+  zero_sum: true
+train:
+  epochs: 200
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0
+  schedule: cosine
+  step_size: 20
+  gamma: 0.3
+  huber_delta: 1.0
+  seed: 0
+  threads: 8
+  device: cuda
+  max_minutes: null
+  buffer_blocks: 8
+synthetic:
+  shards: 4
+  samples: 2000
+  flop_pairs: 25
+  noise: 0.02

@@ -12,6 +12,8 @@
 #SBATCH --job-name=valuenet_train
 #SBATCH --partition=all
 #SBATCH --gres=gpu:1
+# node806-808 are GTX 1080 / 1080 Ti (sm_61); the cu132 torch build only has sm_75+ kernels
+#SBATCH --exclude=node806,node807,node808
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
@@ -29,5 +31,13 @@ fi
 ARGS=("${@//@LOCAL@/$LOCAL}")
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader || true
 $PY -c "import torch, h5py; print('torch', torch.__version__, '| cuda', torch.cuda.is_available(), torch.version.cuda, '|', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no gpu', '| h5py', h5py.__version__)"
+# Fail fast (instead of mid-training) if this GPU's architecture isn't in the torch build.
+$PY -c "
+import sys, torch
+if torch.cuda.is_available():
+    cc = 'sm_%d%d' % torch.cuda.get_device_capability(0)
+    if cc not in torch.cuda.get_arch_list():
+        sys.exit(f'{torch.cuda.get_device_name(0)} is {cc}; torch {torch.__version__} has kernels for {torch.cuda.get_arch_list()} only')
+" || exit 1
 
 $PY -m bombpot.experiments.valuenet.train "${ARGS[@]}"
