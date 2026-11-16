@@ -1,6 +1,8 @@
 """The network that shares weights across hands (valuenet/model.py HandSetNet, features.method
 "hand_set"): per-hand features, shapes, the zero-sum identity, equivariance under permuting
 the hands, save / load, the data path and a short synthetic training."""
+import csv
+
 import numpy as np
 import pytest
 
@@ -126,7 +128,8 @@ def test_training_on_synthetic_shards(tmp_path):
     cfg = {"data": {"dir": str(tmp_path / "data"), "holdout_fraction": 0.25, "block": 256},
            "features": {"method": "hand_set", "n_bins": 36, "num_ranks": 5, "num_suits": 3},
            "model": {"kind": "set", "depth": 2, "width": 48},
-           "train": {"epochs": 40, "batch_size": 32, "lr": 2e-3, "max_minutes": 0.5, "device": "cpu", "threads": 4},
+           "train": {"epochs": 1000, "batch_size": 32, "lr": 2e-3, "max_minutes": 1.0, "device": "cpu", "threads": 4,
+                     "schedule": "cosine_time", "time_budget_minutes": 0.2, "amp": True},
            "synthetic": {"shards": 2, "samples": 600, "flop_pairs": 30}}
     make_synthetic(cfg, log=lambda m: None)
     shards = ShardSet(cfg["data"]["dir"], FeatureConfig(**cfg["features"]), 0.25, 256)
@@ -142,6 +145,9 @@ def test_training_on_synthetic_shards(tmp_path):
     print(f"\nhand_set: {s['epochs']} epochs, held-out loss {b['heldout_loss']:.4g} (zero {b['heldout_zero_loss']:.4g})")
     assert b["heldout_loss"] < 0.2 * b["heldout_zero_loss"]
     assert b["heldout_hand_mae_floor"] < 1e-6  # every hand its own bin
+    rows = list(csv.DictReader(open(tmp_path / "run" / "log.csv")))
+    assert 2 < len(rows) < 1000 and float(rows[-1]["lr"]) < 0.2 * 2e-3  # the time budget ended it, annealed
+    assert float(rows[-1]["seconds"]) < 30
     model = load_model(tmp_path / "run" / "best.pt")
     assert isinstance(model, HandSetNet)
     model.chunk = 50  # evaluation in pieces gives the same numbers

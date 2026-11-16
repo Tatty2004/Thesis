@@ -192,9 +192,10 @@ class HandSetNet(nn.Module):
         w = torch.stack([mass[0], mass[1], possible.to(dt) / count], -1)
         for block in self.blocks:
             h = block(h, g, w, hc, possible)
-        v0, v1 = self.dec(h).unbind(-1)
+        v0, v1 = self.dec(h).to(dt).unbind(-1)  # the correction in the inputs' precision (autocast)
         if self.config.zero_sum:
-            v0, v1 = zero_sum_correction(v0, v1, mass[0], mass[1])
+            with torch.autocast(v0.device.type, enabled=False):
+                v0, v1 = zero_sum_correction(v0, v1, mass[0], mass[1])
         return v0, v1
 
 

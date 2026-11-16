@@ -6,7 +6,10 @@
 Loss: Huber (delta `train.huber_delta`, in pots) on the per-bin values of both players,
 weighted by each bin's range mass (data.py; or, with data.weight "hands", by its share of the
 possible hands), normalized by the total weight of the batch: a weighted mean over bins, in
-pots. data.target picks the per-hand values behind the bin targets: "cfv" (the solved
+pots. train.schedule: "cosine" / "step" (per epoch), or "cosine_time": a cosine over wall time
+that reaches 0 after train.time_budget_minutes (updated every step; training stops at the end
+of the epoch that reaches it), for runs under a job time limit whose speed isn't known in
+advance. train.amp: mixed precision on CUDA (the loss stays in float32). data.target picks the per-hand values behind the bin targets: "cfv" (the solved
 profile's) or "br" (best-response values). Adam, cosine or step learning rate. Held-out samples
 are whole flop pairs (data.holdout_fraction).
 
@@ -47,7 +50,7 @@ DEFAULTS = {
     "model": {"depth": 7, "width": 500, "zero_sum": True},
     "train": {"epochs": 50, "batch_size": 1024, "lr": 1e-3, "weight_decay": 0.0, "schedule": "cosine",
               "step_size": 20, "gamma": 0.3, "huber_delta": 1.0, "seed": 0, "threads": 8, "device": "auto",
-              "max_minutes": None, "buffer_blocks": 8, "clip": None},
+              "max_minutes": None, "buffer_blocks": 8, "clip": None, "amp": False, "time_budget_minutes": None},
     "synthetic": {"shards": 4, "samples": 2000, "flop_pairs": 25, "noise": 0.02},
 }
 
@@ -164,8 +167,15 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tc["epochs"])
     elif tc["schedule"] == "step":
         sched = torch.optim.lr_scheduler.StepLR(opt, step_size=tc["step_size"], gamma=tc["gamma"])
+    elif tc["schedule"] == "cosine_time":
+        if not tc["time_budget_minutes"]:
+            raise ValueError("schedule cosine_time needs train.time_budget_minutes")
+        sched = None
     else:
         raise ValueError(f"unknown schedule {tc['schedule']!r}")
+    budget = 60.0 * tc["time_budget_minutes"] if sched is None else None
+    amp = bool(tc["amp"]) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp)
 
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
@@ -187,20 +197,28 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
         for epoch in range(1, tc["epochs"] + 1):
             tot, wsum = 0.0, 0.0
             for batch in shards.batches("train", bs, rng, tc["buffer_blocks"]):
+                if budget is not None:
+                    frac = min((time.perf_counter() - start) / budget, 1.0)
+                    for group in opt.param_groups:
+                        group["lr"] = 0.5 * tc["lr"] * (1.0 + math.cos(math.pi * frac))
                 t = to_torch(batch, device, fcfg.board == "ids")
-                v = forward(model, t)
-                l0, w0 = weighted_huber(v[0], t["t0"], t["w0"], delta)
-                l1, w1 = weighted_huber(v[1], t["t1"], t["w1"], delta)
+                with torch.autocast("cuda", enabled=amp):
+                    v = forward(model, t)
+                l0, w0 = weighted_huber(v[0].float(), t["t0"], t["w0"], delta)
+                l1, w1 = weighted_huber(v[1].float(), t["t1"], t["w1"], delta)
                 loss = (l0 + l1) / (w0 + w1).clamp_min(1e-12)
                 opt.zero_grad(set_to_none=True)
-                loss.backward()
+                scaler.scale(loss).backward()
                 if tc["clip"]:
+                    scaler.unscale_(opt)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), tc["clip"])
-                opt.step()
+                scaler.step(opt)
+                scaler.update()
                 tot += (l0 + l1).item()
                 wsum += (w0 + w1).item()
             lr = opt.param_groups[0]["lr"]
-            sched.step()
+            if sched is not None:
+                sched.step()
             ev = evaluate(model, shards, "heldout", device, delta, 4 * bs)
             row = {"epoch": epoch, "seconds": round(time.perf_counter() - start, 2), "lr": lr,
                    "train_loss": tot / max(wsum, 1e-300), "heldout_loss": ev["loss"],
@@ -216,6 +234,9 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
                            hand_mae=ev["hand_mae"])
             if tc["max_minutes"] and time.perf_counter() - start > 60 * tc["max_minutes"]:
                 log(f"stopping: max_minutes {tc['max_minutes']} reached after epoch {epoch}")
+                break
+            if budget is not None and time.perf_counter() - start >= budget:
+                log(f"time budget of {tc['time_budget_minutes']} minutes reached after epoch {epoch}")
                 break
     shards.close()
     best_row = min(rows, key=lambda r: r["heldout_loss"])
