@@ -10,6 +10,10 @@ board:
   hand      every hand its own bin (n_bins = H): the range itself, no abstraction. Only
             meaningful for samples that share one hand list (one flop pair): the reference
             that separates what binning costs from what the network costs
+  hand_set  like "hand" (every hand its own bin), and each sample also carries per-hand
+            descriptors (`hand_features`: equities, possible flag, how each card meets each
+            board) and the hands' card ids, for a network that shares its parameters across
+            hands (model.HandSetNet). Needs the shard's hand list.
 
 Bin b of method avg_1d holds equities in [b/n, (b+1)/n), the last bin also holds 1.0.
 
@@ -26,7 +30,8 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-METHODS = ("avg_1d", "joint_2d", "hand")
+METHODS = ("avg_1d", "joint_2d", "hand", "hand_set")
+PER_HAND = ("hand", "hand_set")  # every hand its own bin
 BOARDS = ("onehot", "ids", "none")
 
 
@@ -58,7 +63,7 @@ class FeatureConfig:
 
     @property
     def num_bins(self) -> int:
-        return self.n_bins if self.method in ("avg_1d", "hand") else self.n_bins ** 2
+        return self.n_bins if self.method in ("avg_1d",) + PER_HAND else self.n_bins ** 2
 
     @property
     def num_cards(self) -> int:
@@ -100,7 +105,7 @@ def bin_index(equity: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
     """(..., H, 2) equities -> (..., H) bin of each hand."""
     equity = np.asarray(equity)
     n = cfg.n_bins
-    if cfg.method == "hand":  # every hand its own bin (n_bins = H): no abstraction, one hand list only
+    if cfg.method in PER_HAND:  # every hand its own bin (n_bins = H): no abstraction, one hand list only
         if equity.shape[-2] != n:
             raise ValueError(f"method 'hand' needs n_bins = the number of hands ({equity.shape[-2]})")
         return np.broadcast_to(np.arange(n), equity.shape[:-1]).copy()
@@ -138,6 +143,41 @@ def to_hands(bin_values: np.ndarray, bins: np.ndarray) -> np.ndarray:
     bv = np.broadcast_to(bin_values, lead + bin_values.shape[-1:])
     b = np.broadcast_to(bins, lead + bins.shape[-1:])
     return np.take_along_axis(bv, b, axis=-1)
+
+
+# Per-hand descriptors ---------------------------------------------------------------------
+
+
+HAND_FEATURES = 11
+
+
+def hand_cards(hands: np.ndarray) -> np.ndarray:
+    """(..., H, 2) card ids with each hand's higher card id first (card ids are rank-major),
+    so a hand's two cards have one order."""
+    return -np.sort(-np.asarray(hands, dtype=np.int64), axis=-1)
+
+
+def hand_features(equity: np.ndarray, hands: np.ndarray, boards: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
+    """Per-hand descriptors, (..., H, HAND_FEATURES) float32, from `equity` (..., H, 2), the
+    hand list `hands` ((H, 2) or (..., H, 2) card ids) and `boards` (..., 2, k):
+      0-1   turn-end equity on board A and B
+      2     1 if the hand can be held (neither card on a board)
+      3-6   for the hand's higher card then its lower card, on board A then B: the share of
+            the board's cards with the card's rank
+      7-10  the same for the card's suit
+    Everything is relative to the boards; which hand is which only enters through the cards."""
+    equity, boards = np.asarray(equity), np.asarray(boards, dtype=np.int64)
+    lead = equity.shape[:-2]
+    c = np.broadcast_to(hand_cards(hands), lead + equity.shape[-2:-1] + (2,))
+    S, k = cfg.num_suits, boards.shape[-1]
+    b = boards[..., None, None, :, :]                          # (..., 1, 1, 2, k)
+    x = c[..., None, None]                                     # (..., H, 2, 1, 1)
+    possible = ~(x == b).any(axis=(-3, -2, -1))
+    rank = ((x // S) == (b // S)).sum(-1) / k                  # (..., H, 2 cards, 2 boards)
+    suit = ((x % S) == (b % S)).sum(-1) / k
+    H = c.shape[-2]
+    return np.concatenate([equity, possible[..., None], rank.reshape(lead + (H, 4)),
+                           suit.reshape(lead + (H, 4))], axis=-1).astype(np.float32)
 
 
 # Boards, pot and stack --------------------------------------------------------------------

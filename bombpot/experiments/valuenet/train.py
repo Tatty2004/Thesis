@@ -77,7 +77,28 @@ def to_torch(batch: dict, device, board_ids: bool):
     t["board"] = torch.as_tensor(batch["board"], device=device)
     if not board_ids:
         t["board"] = t["board"].float()
+    for k in ("hx", "hc"):  # per-hand inputs (features.method "hand_set")
+        if k in batch:
+            t[k] = torch.as_tensor(batch[k], device=device)
     return t
+
+
+def forward(model, t: dict):
+    """The model's (v0, v1) for a to_torch batch, with the per-hand inputs if the batch has
+    them."""
+    return model(t["board"], t["scalars"], t["h0"], t["h1"], **{k: t[k] for k in ("hx", "hc") if k in t})
+
+
+def forward_chunked(model, t: dict):
+    """`forward` in pieces of the model's `chunk` samples (models whose memory grows fast with
+    the batch), for evaluation."""
+    import torch
+
+    chunk, n = getattr(model, "chunk", None), len(t["scalars"])
+    if not chunk or n <= chunk:
+        return forward(model, t)
+    parts = [forward(model, {k: v[a:a + chunk] for k, v in t.items()}) for a in range(0, n, chunk)]
+    return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
 
 
 def evaluate(model, shards, split: str, device, delta: float, batch_size: int) -> dict:
@@ -91,7 +112,7 @@ def evaluate(model, shards, split: str, device, delta: float, batch_size: int) -
     with torch.no_grad():
         for batch in shards.batches(split, batch_size):
             t = to_torch(batch, device, model.features.board == "ids")
-            v = model(t["board"], t["scalars"], t["h0"], t["h1"])
+            v = forward_chunked(model, t)
             for p in (0, 1):
                 l, w = weighted_huber(v[p], t[f"t{p}"], t[f"w{p}"], delta)
                 z, _ = weighted_huber(torch.zeros_like(v[p]), t[f"t{p}"], t[f"w{p}"], delta)
@@ -123,7 +144,7 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
 
     from bombpot.valuenet.data import ShardSet
     from bombpot.valuenet.features import FeatureConfig
-    from bombpot.valuenet.model import ModelConfig, ValueNet, save_model
+    from bombpot.valuenet.model import ModelConfig, build_model, save_model
 
     cfg = merged(cfg)
     tc = cfg["train"]
@@ -137,7 +158,7 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
     n_train, n_held = shards.count("train"), shards.count("heldout")
     if n_held == 0 or n_train == 0:
         raise ValueError(f"split has {n_train} training and {n_held} held-out samples")
-    model = ValueNet(fcfg, ModelConfig(**cfg["model"])).to(device)
+    model = build_model(fcfg, ModelConfig(**cfg["model"])).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
     if tc["schedule"] == "cosine":
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tc["epochs"])
@@ -167,7 +188,7 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
             tot, wsum = 0.0, 0.0
             for batch in shards.batches("train", bs, rng, tc["buffer_blocks"]):
                 t = to_torch(batch, device, fcfg.board == "ids")
-                v = model(t["board"], t["scalars"], t["h0"], t["h1"])
+                v = forward(model, t)
                 l0, w0 = weighted_huber(v[0], t["t0"], t["w0"], delta)
                 l1, w1 = weighted_huber(v[1], t["t1"], t["w1"], delta)
                 loss = (l0 + l1) / (w0 + w1).clamp_min(1e-12)
@@ -213,7 +234,8 @@ def make_synthetic(cfg: dict, log=print) -> None:
     sc, fc = cfg["synthetic"], cfg["features"]
     for i in range(sc["shards"]):
         write_synthetic_shard(d / f"synthetic_{i:03d}.h5", sc["samples"], seed=1000 + i, num_ranks=fc["num_ranks"],
-                              num_suits=fc["num_suits"], flop_pairs=sc["flop_pairs"], noise=sc["noise"])
+                              num_suits=fc["num_suits"], flop_pairs=sc["flop_pairs"], noise=sc["noise"],
+                              card_hands=fc["method"] == "hand_set")
     log(f"wrote {sc['shards']} synthetic shards to {d}")
 
 

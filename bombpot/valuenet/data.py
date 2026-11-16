@@ -36,8 +36,8 @@ from pathlib import Path
 
 import numpy as np
 
-from bombpot.valuenet.features import (FeatureConfig, bin_index, bin_means, encode_boards, histogram,
-                                       pot_features)
+from bombpot.valuenet.features import (FeatureConfig, bin_index, bin_means, encode_boards, hand_cards,
+                                       hand_features, histogram, pot_features)
 
 FIELDS = ("flops", "turn", "range0", "range1", "equity", "pot", "stack", "cfv0", "cfv1")
 
@@ -90,6 +90,9 @@ def featurize(raw: dict, cfg: FeatureConfig, target: str = "cfv", weight: str = 
     bins = bin_index(raw["equity"], cfg)
     B = cfg.num_bins
     out = {"board": encode_boards(boards, cfg), "scalars": pot_features(raw["pot"], raw["stack"]), "bins": bins}
+    if cfg.method == "hand_set":  # per-hand descriptors and card ids (`raw` then needs `hands`)
+        out["hx"] = hand_features(raw["equity"], raw["hands"], boards, cfg)
+        out["hc"] = np.broadcast_to(hand_cards(raw["hands"]), bins.shape + (2,)).astype(np.int16)
     for p in (0, 1):
         r, v = raw[f"range{p}"], raw[f"{target}{p}"]
         t, h = bin_means(v, r, bins, B)
@@ -129,6 +132,7 @@ class ShardSet:
         if not self.paths:
             raise FileNotFoundError(f"no *.h5 shards in {directory}")
         self.files = [h5py.File(p, "r") for p in self.paths]
+        self._hand_lists: dict = {}
         if split == "flop_pair":
             self.heldout = [heldout_mask(f["flops"][:], holdout_fraction, salt, cfg.num_suits) for f in self.files]
         elif split == "sample":
@@ -162,7 +166,21 @@ class ShardSet:
         if not keep.any():
             return None
         raw = {k: f[k][a:b][keep] for k in self.fields}
+        if self.cfg.method == "hand_set":
+            raw["hands"] = self._hands(i, a, b, keep)
         return featurize(raw, self.cfg, self.target, self.weight)
+
+    def _hands(self, i: int, a: int, b: int, keep) -> np.ndarray:
+        """The hand list of rows [a, b) of shard i: (H, 2), or (n, H, 2) when the shard has
+        several lists (`hands` (sets, H, 2) with `hand_set` (N,) naming each row's)."""
+        if i not in self._hand_lists:
+            self._hand_lists[i] = self.files[i]["hands"][:]
+        hands = self._hand_lists[i]
+        if hands.ndim == 2:
+            return hands
+        if len(hands) == 1:
+            return hands[0]
+        return hands[self.files[i]["hand_set"][a:b][keep]]
 
     def batches(self, split: str, batch_size: int, rng: np.random.Generator | None = None, buffer: int = 8):
         """Featurized batches. With `rng`: blocks in random order, `buffer` blocks at a time
@@ -208,11 +226,13 @@ def synthetic_values(equity, range0, range1, pot, stack, boards, num_suits: int,
 
 
 def write_synthetic_shard(path, n: int, seed: int, num_ranks: int = 13, num_suits: int = 4,
-                          flop_pairs: int = 20, noise: float = 0.02) -> None:
+                          flop_pairs: int = 20, noise: float = 0.02, card_hands: bool = False) -> None:
     """A shard in the real layout with synthetic equities, ranges and values
     (`synthetic_values`). Hands are the pairs of the deck's cards outside the flops, indexed
     as pairs of slots (so H = C(cards - 6, 2), 1,035 on 52 cards); each sample draws one of
-    `flop_pairs` flop pairs and two turn cards, which make the hands through them impossible."""
+    `flop_pairs` flop pairs and two turn cards, which make the hands through them impossible.
+    `hands` holds the slot pairs, or with `card_hands` the real layout: one list of card ids
+    per flop pair, (flop_pairs, H, 2), and `hand_set` (N,) naming each row's."""
     import h5py
 
     rng = np.random.default_rng(seed)
@@ -226,8 +246,10 @@ def write_synthetic_shard(path, n: int, seed: int, num_ranks: int = 13, num_suit
             "equity": np.zeros((n, H, 2), np.float32), "pot": np.zeros(n, np.float32),
             "stack": np.zeros(n, np.float32), "cfv0": np.zeros((n, H), np.float32),
             "cfv1": np.zeros((n, H), np.float32)}
+    which = np.zeros(n, np.int32)
     for s in range(n):
-        six = pairs[rng.integers(flop_pairs)]
+        which[s] = rng.integers(flop_pairs)
+        six = pairs[which[s]]
         rest = np.setdiff1d(np.arange(C), six)
         t = rng.choice(len(rest), 2, replace=False)
         data["flops"][s] = six.reshape(2, 3)
@@ -251,7 +273,12 @@ def write_synthetic_shard(path, n: int, seed: int, num_ranks: int = 13, num_suit
     with h5py.File(path, "w") as f:
         for k, v in data.items():
             f.create_dataset(k, data=v, chunks=True if v.ndim > 1 else None)
-        f.create_dataset("hands", data=np.stack(iu, -1).astype(np.int16))
+        if card_hands:
+            rests = [np.setdiff1d(np.arange(C), six) for six in pairs]
+            f.create_dataset("hands", data=np.stack([np.stack([r[iu[0]], r[iu[1]]], -1) for r in rests]).astype(np.int16))
+            f.create_dataset("hand_set", data=which)
+        else:
+            f.create_dataset("hands", data=np.stack(iu, -1).astype(np.int16))
         f.create_dataset("subgame_exploitability", data=np.zeros(n, np.float32))
         f.create_dataset("iters", data=np.zeros(n, np.int32))
         f.attrs.update({"synthetic": True, "seed": seed, "num_ranks": num_ranks, "num_suits": num_suits,
