@@ -1,0 +1,35 @@
+# HandSetNet with attention, continued (train.init) on the 49k random-range samples plus round-1 on-policy samples (real_trunk attn49k_r1).
+data:
+  dir: /n/fs/ugrad/ug27/rb5709/Thesis/results/valuenet/data/real_op1
+  holdout_fraction: 0.1
+  block: 250
+  salt: real-pilot-0
+  target: cfv
+  weight: range
+  split: sample
+features:
+  method: hand_set
+  n_bins: 1035
+  board: onehot
+  num_ranks: 13
+  num_suits: 4
+model:
+  kind: set
+  zero_sum: true
+  depth: 3
+  width: 128
+  heads: 4
+train:
+  epochs: 1000
+  schedule: cosine_time
+  time_budget_minutes: 150
+  amp: true
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0
+  huber_delta: 1.0
+  seed: 0
+  threads: 8
+  device: cuda
+  buffer_blocks: 8
+  clip: 1.0
