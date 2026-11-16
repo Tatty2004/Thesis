@@ -123,20 +123,18 @@ class SetBlock(nn.Module):
         self.attn = nn.MultiheadAttention(d, heads, batch_first=True) if heads else None
         self.out = nn.Sequential(nn.GELU(), nn.Linear(d, d), nn.Dropout(dropout))
 
-    def forward(self, h, g, w, hc, possible):
+    def forward(self, h, g, w, inc, possible):
         """h (N, H, d), g (N, d), w (N, H, 3) pooling weights (range0, range1, uniform over
-        the possible hands), hc (N, H, 2) card ids, possible (N, H) bool."""
+        the possible hands), inc (N, H, cards) 1 where the hand holds the card, possible
+        (N, H) bool."""
         z = self.norm(h)
         N, H, d = z.shape
         pooled = torch.einsum("nhk,nhd->nkd", w, z).reshape(N, 3 * d)
         u = self.own(z) + self.pooled(torch.cat([pooled, g], -1)).unsqueeze(1)
-        if self.card is not None:
+        if self.card is not None:  # sums over the hands through each card, then back to hands
             zw = (z.unsqueeze(2) * w[..., :2].unsqueeze(-1)).reshape(N, H, 2 * d)
-            per_card = z.new_zeros(N, self.num_cards, 2 * d)
-            idx = [hc[..., c].unsqueeze(-1).expand(N, H, 2 * d) for c in (0, 1)]
-            for i in idx:
-                per_card = per_card.scatter_add(1, i, zw)
-            u = u + self.card(sum(per_card.gather(1, i) for i in idx) * (self.num_cards / 4))
+            per_card = torch.bmm(inc.transpose(1, 2), zw)
+            u = u + self.card(torch.bmm(inc, per_card) * (self.num_cards / 4))
         if self.attn is not None:
             u = u + self.attn(z, z, z, key_padding_mask=~possible, need_weights=False)[0]
         return h + self.out(u)
@@ -190,8 +188,9 @@ class HandSetNet(nn.Module):
         x = torch.cat([cards, pair.unsqueeze(-1), suited.unsqueeze(-1), hx, rng], -1)
         h = self.enc(x) + g.unsqueeze(1)
         w = torch.stack([mass[0], mass[1], possible.to(dt) / count], -1)
+        inc = nn.functional.one_hot(hc, self.features.num_cards).sum(2).to(dt)
         for block in self.blocks:
-            h = block(h, g, w, hc, possible)
+            h = block(h, g, w, inc, possible)
         v0, v1 = self.dec(h).to(dt).unbind(-1)  # the correction in the inputs' precision (autocast)
         if self.config.zero_sum:
             with torch.autocast(v0.device.type, enabled=False):
