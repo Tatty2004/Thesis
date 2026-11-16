@@ -337,3 +337,146 @@ def solve_subgame_gpu(street, template, contrib, reach0, reach1, variant: str = 
     ev = g.solve(iters, tol, check_every)
     return Subgame(ev["values"], ev["br_values"], [], ev["iterations"], ev["exploitability"],
                    ev["exploitability_raw"], ev["mass"], g.seconds, None)
+
+
+# Safe re-solving (core/solvers/resolve.py's gadget) -------------------------------------------
+
+
+class GpuGadget(GpuSubgame):
+    """The re-solving gadget of one one-line subgame (resolve._solve with `cfv`): player p
+    re-solves from its root reach; the opponent o chooses per hand between F (enter, with reach
+    equal to its F probability) and T (take cfv[h]). The gadget's own numbers (2 per hand) are
+    kept in float64.
+
+    reach_p (H,) p's root reach; cfv (H,) o's T values, in the units of this street's root values
+    (chance weight x p's reach x payoff, summed over the deals), as resolve's opponent_cfv.
+
+    The average strategies weigh each iteration by the acting player's own reach from the root
+    of the gadget game: o's by its F probability times its reach within the subgame (as
+    resolve._solve), p's by its reach within the subgame (its root reach is the same in every
+    iteration, so that is resolve's average wherever p's root reach is positive, and p's
+    strategy stays defined for the hands it doesn't hold)."""
+
+    def __init__(self, street, template, contrib, reach_p, cfv, player: int, variant: str = "dcfr",
+                 alpha: float = 1.5, beta: float = 0.0, gamma: float = 2.0, dtype=torch.float32, device="cuda"):
+        H = len(reach_p)
+        r = [np.ones(H), np.ones(H)]
+        r[player] = np.asarray(reach_p, dtype=float)
+        super().__init__(street, template, contrib, r[0], r[1], variant, alpha, beta, gamma, dtype, device)
+        self.p, self.o = player, 1 - player
+        f64 = torch.float64
+        self.cfv = torch.as_tensor(np.asarray(cfv, dtype=float), device=self.device, dtype=f64)
+        self.rp = torch.as_tensor(r[player], device=self.device, dtype=f64)
+        self.g_regret = torch.zeros((H, 2), device=self.device, dtype=f64)
+        self.g_cum = torch.zeros((H, 2), device=self.device, dtype=f64)
+        self.g_sig = torch.full((H, 2), 0.5, device=self.device, dtype=f64)
+
+    def _root(self, follow):
+        """Both root reaches with o's = `follow` (H,), its F probabilities."""
+        root = [None, None]
+        root[self.p] = self.root[self.p]
+        root[self.o] = follow.to(self.dtype).expand(self.D, self.H)
+        return root
+
+    def iterate(self, n: int) -> None:
+        start = time.perf_counter()
+        W = _discounts(self.variant, self.t + 1 + np.arange(n), self.alpha, self.beta, self.gamma)
+        ones = torch.ones((self.D, self.H), device=self.device, dtype=self.dtype)
+        mode = VARIANTS[self.variant]
+
+        def discounted(r, ps, ng, flush):
+            if mode == 1:
+                return r.clamp_(min=0.0)
+            if mode == 2:
+                r = torch.where(r > 0, r * ps, r * ng)
+                if flush is not None:
+                    r = torch.where((r < 0) & (r > flush), torch.zeros_like(r), r)
+            return r
+
+        def matching(r):
+            rp = r.clamp(min=0.0)
+            tot = rp.sum(-1, keepdim=True)
+            return torch.where(tot > 0, rp / torch.where(tot > 0, tot, torch.ones_like(tot)),
+                               torch.full_like(rp, 1.0 / rp.shape[-1]))
+
+        for it in range(n):
+            w0, ps, ng = float(W[0][it]), float(W[1][it]), float(W[2][it])
+            for q in range(2):
+                follow = self.g_sig[:, 0]
+                reach = self._forward(self.sigma, self._root(follow))
+                within = self._forward(self.sigma, (ones, ones))[q]
+                own = follow.to(self.dtype)[None, :] if q == self.o else None
+                tv = self._terminal_values(q, self.sigma, reach)
+                V = [None] * self.K
+                inst = {}
+                for k in range(self.K - 1, -1, -1):
+                    cv = torch.stack(self._children(k, V, tv), dim=-1)
+                    if int(self.player[k]) != q:
+                        V[k] = cv.sum(-1)
+                    else:
+                        V[k] = (self.sigma[k] * cv).sum(-1)
+                        inst[k] = cv - V[k][:, :, None]
+                for k, d in inst.items():
+                    wk = within[k] if own is None else within[k] * own
+                    self.cum[k] += (w0 * wk)[:, :, None] * self.sigma[k]
+                    self.regret[k] = discounted(self.regret[k] + d, ps, ng, self.flush)
+                    self.sigma[k] = matching(self.regret[k])
+                if q == self.o:  # the gadget node: F pays o its root value, T pays cfv
+                    w = V[0].double().sum(0)
+                    value = self.g_sig[:, 0] * w + self.g_sig[:, 1] * self.cfv
+                    self.g_cum += w0 * self.g_sig
+                    self.g_regret = discounted(self.g_regret + torch.stack([w - value, self.cfv - value], -1), ps, ng, None)
+                    self.g_sig = matching(self.g_regret)
+        self.t += n
+        self._sync()
+        self.seconds += time.perf_counter() - start
+
+    def gadget_average(self):
+        tot = self.g_cum.sum(-1, keepdim=True)
+        return torch.where(tot > 0, self.g_cum / torch.where(tot > 0, tot, torch.ones_like(tot)),
+                           torch.full_like(self.g_cum, 0.5))
+
+    def mass(self) -> float:
+        if not hasattr(self, "_mass"):
+            self._mass = float(self.sums.fold(self.root[self.p][None])[0].double().sum())
+        return self._mass
+
+    def evaluate(self) -> dict:
+        """The gadget game's NashConv for the average profile (resolve._solve's evaluate):
+        br_values[o] is o's best-response root value against p's average strategy, what the
+        street above sees when p plays it."""
+        start = time.perf_counter()
+        avg = self.average_strategy()
+        g_avg = self.gadget_average()
+        reach = self._forward(avg, self._root(g_avg[:, 0]))
+        brs = []
+        for q in range(2):
+            tv = self._terminal_values(q, avg, reach)
+            Vb = [None] * self.K
+            for k in range(self.K - 1, -1, -1):
+                cb = torch.stack(self._children(k, Vb, tv), dim=-1)
+                Vb[k] = cb.max(-1).values if int(self.player[k]) == q else cb.sum(-1)
+            brs.append(Vb[0].double().sum(0))
+        best_o = torch.maximum(brs[self.o], self.cfv).sum()
+        best_p = (self.rp * brs[self.p]).sum() - (g_avg[:, 1] * self.cfv).sum()
+        gap = float(best_o + best_p)
+        mass = self.mass()
+        self._sync()
+        self.seconds += time.perf_counter() - start
+        return {"br_values": [b.cpu().numpy() for b in brs], "gap": gap, "mass": mass,
+                "exploitability": gap / mass if mass > 0 else 0.0, "gadget": g_avg.cpu().numpy()}
+
+
+def resolve_gpu(street, template, contrib, reach_p, cfv, player: int, variant: str = "dcfr", iters: int = 1000,
+                tol: float | None = None, check_every: int = 10, dtype=torch.float32, device="cuda",
+                keep_strategy: bool = False) -> dict:
+    """resolve.resolve (safe) for one one-line subgame on a device. Returns GpuGadget.evaluate's
+    dict with `iterations`, `seconds` and, with keep_strategy, `strategy` ([k] (D, H, A) numpy:
+    use p's nodes). `tol` bounds gap / mass (the gadget's NashConv over its mass, chips), as
+    resolve's."""
+    g = GpuGadget(street, template, contrib, reach_p, cfv, player, variant, dtype=dtype, device=device)
+    ev = g.solve(iters, tol, check_every)
+    ev["seconds"] = g.seconds
+    if keep_strategy:
+        ev["strategy"] = [s.double().cpu().numpy() for s in g.average_strategy()]
+    return ev

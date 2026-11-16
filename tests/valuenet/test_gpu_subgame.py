@@ -107,3 +107,34 @@ def test_solves_to_the_tolerance(seed, dtype):
     assert abs(ev["iterations"] - ref["iterations"][0]) <= 20
     for p, r in ((0, r0), (1, r1)):
         assert abs(((ev["values"][p] - ref["values"][0][p]) * r).sum()) / ev["mass"] <= 2 * tol
+
+
+@pytest.mark.parametrize("template,seed,player", [("pot", 0, 0), ("pot", 1, 1), ("limit", 2, 0), ("limit", 3, 1)])
+def test_gadget_matches_resolve(template, seed, player):
+    """The torch gadget (safe re-solve) against core/solvers/resolve.py, free-running in
+    float64: the opponent's best-response root values, the gap, the gadget's average and the
+    re-solver's strategy where it has reach."""
+    from bombpot.core.solvers.resolve import blueprint_cfv, resolve
+    from bombpot.valuenet.gpu_subgame import resolve_gpu
+
+    st, tp, contrib, r0, r1 = _spot(template, seed)
+    n, H = st.num_deals, len(r0)
+    c = np.array([contrib])
+    uniform = [np.full((n, 1, H, len(a)), 1.0 / len(a)) for a in tp.actions]
+    o = 1 - player
+    cfv = blueprint_cfv(st, tp, c, uniform, r0, r1, o, "br")[0]
+    rp = (r0, r1)[player]
+    iters = 7  # free-running: later the two part at exact ties (a regret that is 0 in one and 1e-19 in the other)
+    ref = resolve(st, tp, c, rp, (r0, r1)[o], cfv[None], player, "dcfr", iters, 0.0, True)
+    got = resolve_gpu(st, tp, contrib, rp, cfv, player, "dcfr", iters, None, dtype=torch.float64, device="cpu",
+                      keep_strategy=True)
+    assert got["iterations"] == iters
+    scale = np.abs(cfv).max()
+    np.testing.assert_allclose(got["br_values"][o], ref.br_cfv[o][0], rtol=0, atol=1e-9 * scale)
+    np.testing.assert_allclose(got["gap"], ref.gap[0], rtol=0, atol=1e-9 * scale * H)
+    np.testing.assert_allclose(got["mass"], ref.mass[0], rtol=1e-12)
+    np.testing.assert_allclose(got["gadget"], ref.gadget[0], rtol=0, atol=1e-9)
+    held = rp > 0
+    for k, q in enumerate(tp.players):
+        if q == player:
+            np.testing.assert_allclose(got["strategy"][k][:, held], ref.strategy[k][:, 0][:, held], rtol=0, atol=1e-8)

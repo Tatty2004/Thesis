@@ -8,7 +8,9 @@ G.2), and the network's error where that solve uses it.
    every turn-end state valued by the network (NetLeaf). At each check: the solve's own
    exploitability against the network's values (what the solver believes, not a grade).
    Written to <out>/trunk.json; the average strategy to <out>/strategy.npz (float32, one array
-   per street, class and node: t{t}_c{c}_k{k}) unless --no-strategy.
+   per street, class and node: t{t}_c{c}_k{k}) unless --no-strategy, with real_grade's inputs:
+   roots.npy (both reaches at every river root) and leafcfv.npy (both players' leaf values averaged
+   over the iterations), each (2, turn deals, river lines, hands).
 2. On-policy leaf check: `--samples` turn-end states (turn deal, turn line, close) drawn
    uniformly from the final average strategy's, each with both players' ranges there (masked to
    the possible hands, normalized to sum 1; uniform where a player has no mass, as NetLeaf feeds
@@ -36,6 +38,7 @@ import numpy as np
 from bombpot.core.solvers.range_cfr import forward
 from bombpot.core.solvers.subgame import line_template
 from bombpot.experiments.valuenet import datagen as dg
+from bombpot.experiments.valuenet import real_grade as rg
 from bombpot.experiments.valuenet.gate_f import LeafCFR, turn_pots
 from bombpot.experiments.valuenet.onpolicy import normalized
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
@@ -132,13 +135,16 @@ def main(argv=None):
             print(f"check {solver.t}: flop+turn exploitability against the network {ft['exploitability']:.5f} "
                   f"(values {ft.get('br_value_p0')}, {ft.get('br_value_p1')})", flush=True)
             (out / "trunk.json").write_text(json.dumps(result, indent=1, default=float))
-    avg = solver.average_strategy()
+    avg = rg.rounded(solver.average_strategy())  # the strategy as stored (float32): what real_grade grades
     if not a.no_strategy:
-        np.savez(out / "strategy.npz", **{f"t{t}_c{c}_k{k}": np.asarray(x, dtype=np.float32)
-                                          for t, row in enumerate(avg) for c, cls in enumerate(row)
-                                          for k, x in enumerate(cls)})
+        rg.save_strategy(out / "strategy.npz", avg)
     _, closing = forward(upper, solver.hand_sigma(avg), closing=True)
     closing = [tuple(np.array(x) for x in cl) for cl in closing]  # [turn class] (r0, r1) each (D, L, C, H)
+    if not a.no_strategy:  # real_grade's inputs: both reaches and both averaged leaf values at every river root
+        np.save(out / "roots.npy", rg.roots_of(upper, closing))
+        np.save(out / "leafcfv.npy", np.stack([rg.per_line(upper, [solver.cfv_average(c, q)
+                                                                   for c in range(len(upper.classes[2]))])
+                                               for q in (0, 1)]))
     del solver, avg
 
     # the states to solve: (turn deal, turn class, line, close) and both players' reach there
