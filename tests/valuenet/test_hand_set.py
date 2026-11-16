@@ -155,3 +155,7 @@ def test_training_on_synthetic_shards(tmp_path):
     ev = evaluate(model, shards, "heldout", "cpu", 1.0, 400)
     shards.close()
     assert abs(ev["loss"] - b["heldout_loss"]) < 1e-6 * max(1.0, b["heldout_loss"]) + 1e-7
+    # a second run started from the saved weights begins where the first ended
+    cfg["train"].update(init=str(tmp_path / "run" / "best.pt"), epochs=1, lr=1e-9, schedule="cosine")
+    again = train(cfg, tmp_path / "run2", log=lambda m: None)
+    assert abs(again["best"]["heldout_loss"] - b["heldout_loss"]) < 1e-4 * b["heldout_loss"]

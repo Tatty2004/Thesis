@@ -2,6 +2,7 @@
 
     python -m bombpot.experiments.valuenet.train --config bombpot/experiments/configs/valuenet/<name>.yaml
         [--run NAME] [--data DIR] [--device cuda|cpu|auto] [--epochs N] [--max-minutes M] [--synthetic]
+        [--init best.pt]
 
 Loss: Huber (delta `train.huber_delta`, in pots) on the per-bin values of both players,
 weighted by each bin's range mass (data.py; or, with data.weight "hands", by its share of the
@@ -9,7 +10,8 @@ possible hands), normalized by the total weight of the batch: a weighted mean ov
 pots. train.schedule: "cosine" / "step" (per epoch), or "cosine_time": a cosine over wall time
 that reaches 0 after train.time_budget_minutes (updated every step; training stops at the end
 of the epoch that reaches it), for runs under a job time limit whose speed isn't known in
-advance. train.amp: mixed precision on CUDA (the loss stays in float32). data.target picks the per-hand values behind the bin targets: "cfv" (the solved
+advance. train.init (--init): start from a saved model's weights (same features and model
+config; a fresh optimizer and schedule), to continue a run in a second job. train.amp: mixed precision on CUDA (the loss stays in float32). data.target picks the per-hand values behind the bin targets: "cfv" (the solved
 profile's) or "br" (best-response values). Adam, cosine or step learning rate. Held-out samples
 are whole flop pairs (data.holdout_fraction).
 
@@ -50,7 +52,7 @@ DEFAULTS = {
     "model": {"depth": 7, "width": 500, "zero_sum": True},
     "train": {"epochs": 50, "batch_size": 1024, "lr": 1e-3, "weight_decay": 0.0, "schedule": "cosine",
               "step_size": 20, "gamma": 0.3, "huber_delta": 1.0, "seed": 0, "threads": 8, "device": "auto",
-              "max_minutes": None, "buffer_blocks": 8, "clip": None, "amp": False, "time_budget_minutes": None},
+              "max_minutes": None, "buffer_blocks": 8, "clip": None, "amp": False, "time_budget_minutes": None, "init": None},
     "synthetic": {"shards": 4, "samples": 2000, "flop_pairs": 25, "noise": 0.02},
 }
 
@@ -162,6 +164,13 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
     if n_held == 0 or n_train == 0:
         raise ValueError(f"split has {n_train} training and {n_held} held-out samples")
     model = build_model(fcfg, ModelConfig(**cfg["model"])).to(device)
+    if tc["init"]:
+        from bombpot.valuenet.model import load_model
+
+        prev = load_model(tc["init"], device)
+        if prev.features != model.features or prev.config != model.config:
+            raise ValueError(f"train.init {tc['init']} has other features or another model config")
+        model.load_state_dict(prev.state_dict())
     opt = torch.optim.Adam(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
     if tc["schedule"] == "cosine":
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tc["epochs"])
@@ -268,13 +277,14 @@ def main(argv=None) -> None:
     ap.add_argument("--device")
     ap.add_argument("--epochs", type=int)
     ap.add_argument("--max-minutes", type=float)
+    ap.add_argument("--init", help="start from this saved model's weights")
     ap.add_argument("--synthetic", action="store_true", help="write synthetic shards first if the directory has none")
     a = ap.parse_args(argv)
     path = Path(a.config)
     cfg = merged(yaml.safe_load(path.read_text()))
     if a.data:
         cfg["data"]["dir"] = a.data
-    for key, val in (("device", a.device), ("epochs", a.epochs), ("max_minutes", a.max_minutes)):
+    for key, val in (("device", a.device), ("epochs", a.epochs), ("max_minutes", a.max_minutes), ("init", a.init)):
         if val is not None:
             cfg["train"][key] = val
     if cfg["data"]["dir"] is None:
