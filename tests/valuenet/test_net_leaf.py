@@ -131,3 +131,17 @@ def test_per_hand_network_equals_per_item_loop():
                     m = (m0, m1)[1 - p]
                     want[d, l, c] = np.where(possible[d], v.numpy() * pot[l, c] * m * kappa[d], 0.0)
         assert np.allclose(agg, want, rtol=1e-9, atol=1e-12)
+
+
+def test_devices_and_blocks_give_the_same_values():
+    """Rows shared over several replicas, in small blocks, equal one replica's."""
+    cfg = FeatureConfig("joint_2d", 4, "ids", 5, 3)
+    equity, possible, reach, pot, stack, kappa, boards = setup(2)
+    torch.manual_seed(0)
+    model = ValueNet(cfg, ModelConfig(depth=3, width=32)).double().eval()
+    kw = dict(boards_by_deal=boards, possible_by_deal=possible)
+    one = NetLeaf(model, equity, pot, stack, kappa, **kw)
+    many = NetLeaf(model, equity, pot, stack, kappa, devices=["cpu", "cpu", "cpu"], block=5, batch_size=3, **kw)
+    assert len(many.replicas) == 3
+    for p in (0, 1):
+        np.testing.assert_allclose(many.values(p, 1, tuple(reach)), one.values(p, 1, tuple(reach)), rtol=1e-12, atol=1e-14)

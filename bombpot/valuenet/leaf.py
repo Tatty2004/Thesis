@@ -29,10 +29,15 @@ list too (`hands`): every hand is its own bin, step 2 is the identity, and the n
 gets features.hand_features of each deal (its possible flag taken from possible_by_deal) and
 the hands' cards. Its batches are at most `model.chunk` samples.
 
+The rows can be shared out over several devices (`devices`), a copy of the network on each.
+
 The caller (experiments/) supplies the equities, boards and possible hands from the game's
 code; this layer never imports a game.
 """
 from __future__ import annotations
+
+import copy
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -43,39 +48,53 @@ from bombpot.valuenet.features import bin_index, encode_boards, hand_cards, hand
 class NetLeaf:
 
     def __init__(self, model, equity_by_deal, pot_by_line, stack_by_line, kappa_by_deal, device="cpu", *,
-                 boards_by_deal=None, possible_by_deal=None, batch_size: int = 32768, hands=None):
+                 boards_by_deal=None, possible_by_deal=None, batch_size: int = 32768, hands=None,
+                 devices=None, amp: bool = False, block: int = 8192):
         """model: a ValueNet (anything with .features and forward(board, scalars, h0, h1) ->
         (v0, v1) per bin, in pots). equity_by_deal (D, H, 2). pot_by_line, stack_by_line
         (L, closes) chips (pot, and chips behind each) at each turn-closing line, or a list of
         such per line class. kappa_by_deal (D,). boards_by_deal (D, 2, k) card ids, required
         unless the model's board encoding is "none". possible_by_deal (D, H) bool, default all
         hands (then the caller must give impossible hands zero reach). hands (H, 2) card ids,
-        required by a network with per-hand inputs."""
-        self.model = model.to(device).eval()
-        self.cfg, self.device, self.batch_size = model.features, torch.device(device), batch_size
+        required by a network with per-hand inputs.
+
+        devices: several devices (default [device]); each gets a copy of the network and a
+        contiguous share of the rows, on its own thread. amp: mixed precision for the network on
+        CUDA (everything around it stays float64). block: rows moved to a device at a time (the
+        reaches stay on the host otherwise)."""
+        devs = [torch.device(x) for x in (devices or [device])]
+        self.cfg, self.device, self.batch_size = model.features, devs[0], batch_size
+        self.amp, self.block = amp, block
         params = list(model.parameters())
         self.dtype = params[0].dtype if params else torch.float32  # the network's inputs
         equity = np.asarray(equity_by_deal, dtype=np.float64)
         D, H, _ = equity.shape
         self.D, self.H = D, H
-        self.bins = torch.as_tensor(bin_index(equity, self.cfg), device=self.device)
+        bins = bin_index(equity, self.cfg)
         possible = np.ones((D, H), bool) if possible_by_deal is None else np.asarray(possible_by_deal, bool)
-        self.possible = torch.as_tensor(possible, device=self.device)
         if self.cfg.board == "none":
             boards_by_deal = np.zeros((D, 2, self.cfg.board_cards), np.int64)
         elif boards_by_deal is None:
             raise ValueError("boards_by_deal is required for board encoding " + repr(self.cfg.board))
-        self.board = torch.as_tensor(encode_boards(np.asarray(boards_by_deal), self.cfg), device=self.device)
+        board = encode_boards(np.asarray(boards_by_deal), self.cfg)
         self.kappa = np.asarray(kappa_by_deal, dtype=np.float64)
-        self.hx = self.hc = None
+        hx = hc = None
         if getattr(model, "per_hand", False):
-            if hands is None or boards_by_deal is None:
+            if hands is None:
                 raise ValueError("a network with per-hand inputs needs hands and boards_by_deal")
             hx = hand_features(equity, hands, np.asarray(boards_by_deal), self.cfg)
             hx[..., 2] = possible
-            self.hx = torch.as_tensor(hx, device=self.device)
-            self.hc = torch.as_tensor(hand_cards(hands), device=self.device)
+            hc = hand_cards(hands)
             self.batch_size = min(batch_size, getattr(model, "chunk", batch_size))
+        self.replicas = []
+        for k, dev in enumerate(devs):
+            rep = {"device": dev, "model": (model if k == 0 else copy.deepcopy(model)).to(dev).eval(),
+                   "bins": torch.as_tensor(bins, device=dev), "possible": torch.as_tensor(possible, device=dev),
+                   "board": torch.as_tensor(board, device=dev), "kappa": torch.as_tensor(self.kappa, device=dev),
+                   "hx": None if hx is None else torch.as_tensor(hx, device=dev),
+                   "hc": None if hc is None else torch.as_tensor(hc, device=dev)}
+            self.replicas.append(rep)
+        self.model = self.replicas[0]["model"]
         self.pot, self.stack = pot_by_line, stack_by_line
 
     def values(self, p: int, t: int, closing):
@@ -84,34 +103,56 @@ class NetLeaf:
                     for c, pot, st in zip(closing, self.pot, self.stack)]
         return self._values(p, closing, np.asarray(self.pot, float), np.asarray(self.stack, float))
 
-    @torch.no_grad()
     def _values(self, p: int, closing, pot: np.ndarray, stack: np.ndarray) -> np.ndarray:
         r0, r1 = (np.asarray(r, dtype=np.float64) for r in closing)
         D, L, C, H = r0.shape
         assert (D, H) == (self.D, self.H) and pot.shape == stack.shape == (L, C), "shapes disagree"
-        B = self.cfg.num_bins
-        scal = torch.as_tensor(pot_features(pot, stack).reshape(L * C, -1), device=self.device)
-        out = np.empty((D * L * C, H))
-        flat = [torch.as_tensor(r.reshape(-1, H), device=self.device) for r in (r0, r1)]
-        for a in range(0, D * L * C, self.batch_size):
-            n = torch.arange(a, min(a + self.batch_size, D * L * C), device=self.device)
-            d, lc = n // (L * C), n % (L * C)
-            poss = self.possible[d]
-            bins = self.bins[d]
-            hists, mass = [], []
-            for r in flat:
-                x = torch.where(poss, r[n], 0.0)
-                m = x.sum(-1, keepdim=True)
-                uni = poss.double() / poss.double().sum(-1, keepdim=True).clamp_min(1.0)
-                x = torch.where(m > 0, x / torch.where(m > 0, m, 1.0), uni)
-                h = torch.zeros(len(n), B, dtype=torch.float64, device=self.device).scatter_add_(1, bins, x)
-                hists.append(h.to(self.dtype))
-                mass.append(m[:, 0])
-            board = self.board[d] if self.cfg.board == "ids" else self.board[d].to(self.dtype)
-            hand = {} if self.hx is None else {"hx": self.hx[d], "hc": self.hc.expand(len(n), H, 2)}
-            v = self.model(board, scal[lc].to(self.dtype), hists[0], hists[1], **hand)[p]
-            cfv = torch.gather(v.double(), 1, bins)
-            scale = torch.as_tensor(pot.reshape(-1), device=self.device)[lc] * mass[1 - p] \
-                * torch.as_tensor(self.kappa, device=self.device)[d]
-            out[a:a + len(n)] = torch.where(poss, cfv * scale[:, None], 0.0).cpu().numpy()
+        rows = D * L * C
+        flat = [np.ascontiguousarray(r.reshape(rows, H)) for r in (r0, r1)]
+        scal = pot_features(pot, stack).reshape(L * C, -1)
+        out = np.empty((rows, H))
+        K = len(self.replicas)
+        cuts = [rows * k // K for k in range(K + 1)]
+        if K == 1:
+            self._rows(self.replicas[0], p, flat, scal, pot.reshape(-1), out, 0, rows, L * C)
+        else:
+            with ThreadPoolExecutor(K) as pool:
+                jobs = [pool.submit(self._rows, rep, p, flat, scal, pot.reshape(-1), out, cuts[k], cuts[k + 1], L * C)
+                        for k, rep in enumerate(self.replicas)]
+                for j in jobs:
+                    j.result()
         return out.reshape(D, L, C, H)
+
+    def _rows(self, rep, p: int, flat, scal_np, pot_np, out, lo: int, hi: int, LC: int) -> None:
+        """Rows [lo, hi) of `out` on one replica."""
+        dev, model, B = rep["device"], rep["model"], self.cfg.num_bins
+        H = self.H
+        with torch.no_grad():
+            scal = torch.as_tensor(scal_np, device=dev)
+            potv = torch.as_tensor(pot_np, device=dev)
+            for A in range(lo, hi, self.block):
+                Z = min(A + self.block, hi)
+                blk = [torch.from_numpy(r[A:Z]).to(dev) for r in flat]
+                res = torch.empty(Z - A, H, dtype=torch.float64, device=dev)
+                for a in range(A, Z, self.batch_size):
+                    n = torch.arange(a, min(a + self.batch_size, Z), device=dev)
+                    d, lc = n // LC, n % LC
+                    poss = rep["possible"][d]
+                    bins = rep["bins"][d]
+                    hists, mass = [], []
+                    for r in blk:
+                        x = torch.where(poss, r[n - A], 0.0)
+                        m = x.sum(-1, keepdim=True)
+                        uni = poss.double() / poss.double().sum(-1, keepdim=True).clamp_min(1.0)
+                        x = torch.where(m > 0, x / torch.where(m > 0, m, 1.0), uni)
+                        h = torch.zeros(len(n), B, dtype=torch.float64, device=dev).scatter_add_(1, bins, x)
+                        hists.append(h.to(self.dtype))
+                        mass.append(m[:, 0])
+                    board = rep["board"][d] if self.cfg.board == "ids" else rep["board"][d].to(self.dtype)
+                    hand = {} if rep["hx"] is None else {"hx": rep["hx"][d], "hc": rep["hc"].expand(len(n), H, 2)}
+                    with torch.autocast("cuda", enabled=self.amp and dev.type == "cuda"):
+                        v = model(board, scal[lc].to(self.dtype), hists[0], hists[1], **hand)[p]
+                    cfv = torch.gather(v.double(), 1, bins)
+                    scale = potv[lc] * mass[1 - p] * rep["kappa"][d]
+                    res[a - A:a - A + len(n)] = torch.where(poss, cfv * scale[:, None], 0.0)
+                out[A:Z] = res.cpu().numpy()

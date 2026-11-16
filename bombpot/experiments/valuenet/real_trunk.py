@@ -17,6 +17,10 @@ G.2), and the network's error where that solve uses it.
    <out>/onpolicy.h5, so eval_common measures any network on it. <out>/onpolicy_meta.npz has, per
    sample, deal, line, close and each player's reach mass at that state (for weighting).
 
+   The drawn states (with both reaches) are also written to <out>/onpolicy_todo.npz. With --defer
+   the run stops there, and `--part i/n` (no trunk solve, same --out) solves slice i of n into
+   <out>/onpolicy_<i>.h5, so the river solves can run as an array of GPU tasks.
+
 The per-deal turn-end equities (a river street per turn deal) are cached in <out>/../equity_<flops>.npy.
 Needs torch (the scratch environment).
 """
@@ -61,7 +65,7 @@ def turn_equities(river, D: int, cache: Path) -> np.ndarray:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--model", required=True)
+    ap.add_argument("--model", help="required unless --part")
     ap.add_argument("--flops", default="Ah7c2d,KsKd9h")
     ap.add_argument("--deck", default="13,4")
     ap.add_argument("--iters", type=int, default=100)
@@ -74,6 +78,11 @@ def main(argv=None):
     ap.add_argument("--solver", default="gpu", choices=["gpu", "fused"])
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-strategy", action="store_true")
+    ap.add_argument("--amp", action="store_true", help="mixed precision for the network leaf")
+    ap.add_argument("--defer", action="store_true",
+                    help="write the drawn states to <out>/onpolicy_todo.npz and stop; solve them with --part")
+    ap.add_argument("--part", help="i/n: no trunk solve; solve slice i of n of <out>/onpolicy_todo.npz "
+                                   "into <out>/onpolicy_<i>.h5")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     import torch
@@ -99,12 +108,18 @@ def main(argv=None):
     if any(rc.template.num_nodes == 0 for rc in upper.classes[2]):
         raise NotImplementedError("river classes without betting (all-in) need exact showdown values")
     equity = turn_equities(river, D, out.parent / f"equity_{a.flops.replace(',', '_')}_{nr}x{ns}.npy")
+    todo_path = out / "onpolicy_todo.npz"
+    if a.part:
+        return solve_states(a, game, upper, river, turn, equity, np.load(todo_path), out)
     model = load_model(a.model, a.device)
     boards = np.concatenate([np.broadcast_to(np.array(game.flops), (D, 2, 3)),
                              np.asarray(river.turn_cards)[:, :, None]], axis=-1)
     pots = turn_pots(upper)
     leaf = NetLeaf(model, equity, pots, [dg.STACK - p / 2 for p in pots], turn.kappa, a.device,
-                   boards_by_deal=boards, possible_by_deal=turn.valid)
+                   boards_by_deal=boards, possible_by_deal=turn.valid, hands=np.array(upper.hands, dtype=np.int64),
+                   devices=[f"cuda:{i}" for i in range(torch.cuda.device_count())] if a.device == "cuda" else None,
+                   amp=a.amp)
+    print(f"leaf on {len(leaf.replicas)} device(s), amp {a.amp}, batch {leaf.batch_size}", flush=True)
     solver = LeafCFR(upper, leaf, a.trunk)
     result = {"args": vars(a), "features": model.features.to_dict(), "turn_deals": D, "hands": H, "checks": {}}
     t0 = time.perf_counter()
@@ -126,31 +141,62 @@ def main(argv=None):
     closing = [tuple(np.array(x) for x in cl) for cl in closing]  # [turn class] (r0, r1) each (D, L, C, H)
     del solver, avg
 
-    # the river line that continues each (turn class, line, close)
+    # the states to solve: (turn deal, turn class, line, close) and both players' reach there
+    keys = sorted(continuations(upper))
+    rng = np.random.default_rng(a.seed)
+    picks = sorted((int(rng.integers(D)), keys[int(rng.integers(len(keys)))]) for _ in range(a.samples))
+    todo = {"deal": np.array([d for d, _ in picks], dtype=np.int64),
+            "key": np.array([k for _, k in picks], dtype=np.int64).reshape(len(picks), 3),
+            "raw0": np.array([closing[pc][0][d, l, c] for d, (pc, l, c) in picks]).reshape(len(picks), H),
+            "raw1": np.array([closing[pc][1][d, l, c] for d, (pc, l, c) in picks]).reshape(len(picks), H)}
+    del closing
+    np.savez(todo_path, **todo)
+    if a.defer:
+        print(f"DONE (deferred {len(picks)} states to {todo_path})", flush=True)
+        return
+    solve_states(a, game, upper, river, turn, equity, todo, out)
+
+
+def continuations(upper) -> dict:
+    """(turn class, line, close) -> (river class, river line) that continues it."""
     cont = {}
     for ci, rc in enumerate(upper.classes[2]):
         for l in range(rc.num_lines):
             cont[(int(rc.parent_class[l]), int(rc.parent_line[l]), int(rc.parent_close[l]))] = (ci, l)
-    keys = sorted(cont)
-    rng = np.random.default_rng(a.seed)
-    picks = sorted((int(rng.integers(D)), keys[int(rng.integers(len(keys)))]) for _ in range(a.samples))
+    return cont
+
+
+def solve_states(a, game, upper, river, turn, equity, todo, out: Path) -> None:
+    """Exact river solves of the drawn states (all, or slice i of n with --part i/n: contiguous
+    in the deal-sorted order), in datagen's shard layout."""
+    import torch
+
+    nr, ns = (int(x) for x in a.deck.split(","))
+    H = turn.valid.shape[1]
+    cont = continuations(upper)
+    S = len(todo["deal"])
+    name, lo, hi = "onpolicy", 0, S
+    if a.part:
+        i, n = (int(x) for x in a.part.split("/"))
+        name, lo, hi = f"onpolicy_{i:03d}", S * i // n, S * (i + 1) // n
     attrs = {"num_ranks": nr, "num_suits": ns, "board_cards": "3,1,1", "num_boards": 2, "ante": 1.0,
              "total_chips": dg.STACK, "template": "pot", "source": "real_trunk onpolicy (average strategy)",
-             "model": a.model, "trunk_iters": a.iters, "tol_pots": a.tol, "iters_cap": a.sub_iters, "variant": "dcfr",
+             "model": str(a.model), "trunk_iters": a.iters, "tol_pots": a.tol, "iters_cap": a.sub_iters, "variant": "dcfr",
              "solver": a.solver, "flops_fixed": a.flops, "git": dg.git_hash(), "units": dg.UNITS}
-    shard = dg.Shard(out / "onpolicy.h5", H, attrs)
+    shard = dg.Shard(out / f"{name}.h5", H, attrs)
     hset = shard.add_hands(np.array(upper.hands, dtype=np.int64))
     meta = {"deal": [], "turn_class": [], "line": [], "close": [], "mass0": [], "mass1": [], "river_class": []}
     t0 = time.perf_counter()
     st, st_d = None, -1
-    for n, (d, (pc, l, c)) in enumerate(picks):
+    for n in range(lo, hi):
+        d, (pc, l, c) = int(todo["deal"][n]), (int(x) for x in todo["key"][n])
         if d != st_d:
             st, st_d = river_street(river, d), d
         ci, lr = cont[(pc, l, c)]
         rc = upper.classes[2][ci]
         P = 2.0 * float(rc.contrib[lr])
         valid = turn.valid[d]
-        raw = [closing[pc][q][d, l, c] for q in (0, 1)]
+        raw = [todo["raw0"][n], todo["raw1"][n]]
         r0, r1 = (normalized(r, valid) for r in raw)
         tp = line_template(rc.template, lr)
         if a.solver == "gpu":
@@ -173,9 +219,9 @@ def main(argv=None):
         for key, val in zip(meta, (d, pc, l, c, float(np.where(valid, raw[0], 0).sum()),
                                    float(np.where(valid, raw[1], 0).sum()), ci)):
             meta[key].append(val)
-        if (n + 1) % 50 == 0 or n + 1 == len(picks):
-            print(f"on-policy sample {n + 1}/{len(picks)}, {time.perf_counter() - t0:.0f}s", flush=True)
-            np.savez(out / "onpolicy_meta.npz", **{k: np.array(v) for k, v in meta.items()})
+        if (n + 1 - lo) % 50 == 0 or n + 1 == hi:
+            print(f"on-policy sample {n + 1 - lo}/{hi - lo}, {time.perf_counter() - t0:.0f}s", flush=True)
+            np.savez(out / f"{name}_meta.npz", **{k: np.array(v) for k, v in meta.items()})
     shard.close()
     print("DONE", flush=True)
 
