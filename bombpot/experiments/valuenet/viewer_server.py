@@ -204,7 +204,8 @@ class Viewer:
         def done(**kw):
             ok = self.possible(public)
             out.update(boards=[[card_str(x) for x in b] for b in boards],
-                       reach=[np.round(np.where(ok, r, 0.0), 5).tolist() for r in reach], **kw)
+                       reach=[np.round(np.where(ok, r, 0.0), 5).tolist() for r in reach],
+                       possible=ok.astype(int).tolist(), **kw)
             return out
 
         def walk(t, tp, contrib, stack, actions, strat):
@@ -236,7 +237,7 @@ class Viewer:
         if kind == "node":
             return node(0, tp, x, contrib, stack, lambda k: self.row(0, k, 0, 0))
         if kind == "fold":
-            return done(terminal=f"Player {x + 1} folds", pot=2 * contrib + sum(chips(hist, contrib, stack)))
+            return done(terminal=f"P{x} folds", pot=2 * contrib + sum(chips(hist, contrib, stack)))
         # Turn
         l1 = self.turn_line[x]
         lc = up.classes[1][0]
@@ -254,10 +255,10 @@ class Viewer:
         if kind == "node":
             return node(1, tp, x, contrib, stack, strat)
         if kind == "fold":
-            return done(terminal=f"Player {x + 1} folds", pot=2 * contrib + sum(chips(hist, contrib, stack)))
+            return done(terminal=f"P{x} folds", pot=2 * contrib + sum(chips(hist, contrib, stack)))
         # River
         if (l1, x) not in self.river_of:
-            return done(terminal="All in: the river is dealt and the hands are shown")
+            return done(terminal="All in: the river is dealt and the hands are shown", pot=2 * contrib + sum(chips(hist, contrib, stack)))
         c, l2, i = self.river_of[(l1, x)]
         rc = up.classes[2][c]
         tp, contrib, stack = rc.template, float(rc.contrib[l2]), float(rc.stack[l2])
@@ -285,7 +286,7 @@ class Viewer:
         if kind == "node":
             return node(2, tp, x, contrib, stack, strat, extra)
         pot = 2 * contrib + sum(chips(hist, contrib, stack))
-        return done(terminal=f"Player {x + 1} folds" if kind == "fold" else "Showdown", pot=pot, **extra)
+        return done(terminal=f"P{x} folds" if kind == "fold" else "Showdown", pot=pot, **extra)
 
     def meta(self) -> dict:
         checks = self.info.get("checks", {})
