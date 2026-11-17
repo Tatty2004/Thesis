@@ -92,6 +92,9 @@ def sweep_index(street) -> dict:
             "cards": cards, "valid": np.asarray(street.valid, bool), "kappa": np.asarray(street.kappa, dtype=float)}
 
 
+HOST64 = ("mps",)  # device types without float64
+
+
 class StreetSums:
     """The fold and showdown sums of one street on a device, for batches x (T, D, H) of
     opponent reaches: core/removal's `fold` and `beats` (with the street's chance weight)."""
@@ -155,6 +158,8 @@ class GpuSubgame:
             raise ValueError(f"unknown variant {variant!r}")
         self.sums = street if isinstance(street, StreetSums) else StreetSums(street, device, dtype)
         self.device, self.dtype = self.sums.device, self.sums.dtype
+        # Apple's GPU backend has no float64: the float64 sums are then taken on the host.
+        self.host = torch.device("cpu") if self.device.type in HOST64 else self.device
         self.variant, self.alpha, self.beta, self.gamma = variant, alpha, beta, gamma
         self.player, self.nact, self.kind, self.target, self.coef = compile_template(template, contrib)
         self.K = len(self.player)
@@ -269,6 +274,9 @@ class GpuSubgame:
         self._sync()
         self.seconds += time.perf_counter() - start
 
+    def _f64(self, x):
+        return x.to(self.host).double()
+
     def _sync(self):
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
@@ -283,7 +291,7 @@ class GpuSubgame:
 
     def mass(self) -> float:
         if not hasattr(self, "_mass"):
-            f = self.sums.fold(self.root[1][None])[0].double().sum(0)  # (H,)
+            f = self._f64(self.sums.fold(self.root[1][None])[0]).sum(0)  # (H,)
             self._mass = float((f.cpu().numpy() * self.roots[0]).sum())
         return self._mass
 
@@ -305,8 +313,8 @@ class GpuSubgame:
                     Vb[k] = cb.max(-1).values
                 else:
                     Vc[k], Vb[k] = cc.sum(-1), cb.sum(-1)
-            values.append(Vc[0].double().sum(0).cpu().numpy())
-            brs.append(Vb[0].double().sum(0).cpu().numpy())
+            values.append(self._f64(Vc[0]).sum(0).cpu().numpy())
+            brs.append(self._f64(Vb[0]).sum(0).cpu().numpy())
         raw = float(((brs[0] * self.roots[0]).sum() + (brs[1] * self.roots[1]).sum()) / 2)
         mass = self.mass()
         self._sync()
@@ -365,17 +373,17 @@ class GpuGadget(GpuSubgame):
         super().__init__(street, template, contrib, r[0], r[1], variant, alpha, beta, gamma, dtype, device)
         self.p, self.o = player, 1 - player
         f64 = torch.float64
-        self.cfv = torch.as_tensor(np.asarray(cfv, dtype=float), device=self.device, dtype=f64)
-        self.rp = torch.as_tensor(r[player], device=self.device, dtype=f64)
-        self.g_regret = torch.zeros((H, 2), device=self.device, dtype=f64)
-        self.g_cum = torch.zeros((H, 2), device=self.device, dtype=f64)
-        self.g_sig = torch.full((H, 2), 0.5, device=self.device, dtype=f64)
+        self.cfv = torch.as_tensor(np.asarray(cfv, dtype=float), device=self.host, dtype=f64)
+        self.rp = torch.as_tensor(r[player], device=self.host, dtype=f64)
+        self.g_regret = torch.zeros((H, 2), device=self.host, dtype=f64)
+        self.g_cum = torch.zeros((H, 2), device=self.host, dtype=f64)
+        self.g_sig = torch.full((H, 2), 0.5, device=self.host, dtype=f64)
 
     def _root(self, follow):
         """Both root reaches with o's = `follow` (H,), its F probabilities."""
         root = [None, None]
         root[self.p] = self.root[self.p]
-        root[self.o] = follow.to(self.dtype).expand(self.D, self.H)
+        root[self.o] = follow.to(self.device, self.dtype).expand(self.D, self.H)
         return root
 
     def iterate(self, n: int) -> None:
@@ -405,7 +413,7 @@ class GpuGadget(GpuSubgame):
                 follow = self.g_sig[:, 0]
                 reach = self._forward(self.sigma, self._root(follow))
                 within = self._forward(self.sigma, (ones, ones))[q]
-                own = follow.to(self.dtype)[None, :] if q == self.o else None
+                own = follow.to(self.device, self.dtype)[None, :] if q == self.o else None
                 tv = self._terminal_values(q, self.sigma, reach)
                 V = [None] * self.K
                 inst = {}
@@ -422,7 +430,7 @@ class GpuGadget(GpuSubgame):
                     self.regret[k] = discounted(self.regret[k] + d, ps, ng, self.flush)
                     self.sigma[k] = matching(self.regret[k])
                 if q == self.o:  # the gadget node: F pays o its root value, T pays cfv
-                    w = V[0].double().sum(0)
+                    w = self._f64(V[0]).sum(0)
                     value = self.g_sig[:, 0] * w + self.g_sig[:, 1] * self.cfv
                     self.g_cum += w0 * self.g_sig
                     self.g_regret = discounted(self.g_regret + torch.stack([w - value, self.cfv - value], -1), ps, ng, None)
@@ -438,7 +446,7 @@ class GpuGadget(GpuSubgame):
 
     def mass(self) -> float:
         if not hasattr(self, "_mass"):
-            self._mass = float(self.sums.fold(self.root[self.p][None])[0].double().sum())
+            self._mass = float(self._f64(self.sums.fold(self.root[self.p][None])[0]).sum())
         return self._mass
 
     def evaluate(self) -> dict:
@@ -456,7 +464,7 @@ class GpuGadget(GpuSubgame):
             for k in range(self.K - 1, -1, -1):
                 cb = torch.stack(self._children(k, Vb, tv), dim=-1)
                 Vb[k] = cb.max(-1).values if int(self.player[k]) == q else cb.sum(-1)
-            brs.append(Vb[0].double().sum(0))
+            brs.append(self._f64(Vb[0]).sum(0))
         best_o = torch.maximum(brs[self.o], self.cfv).sum()
         best_p = (self.rp * brs[self.p]).sum() - (g_avg[:, 1] * self.cfv).sum()
         gap = float(best_o + best_p)
@@ -478,5 +486,5 @@ def resolve_gpu(street, template, contrib, reach_p, cfv, player: int, variant: s
     ev = g.solve(iters, tol, check_every)
     ev["seconds"] = g.seconds
     if keep_strategy:
-        ev["strategy"] = [s.double().cpu().numpy() for s in g.average_strategy()]
+        ev["strategy"] = [s.cpu().double().numpy() for s in g.average_strategy()]
     return ev
