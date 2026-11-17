@@ -109,7 +109,8 @@ class Viewer:
                 i += 1
         tc = up.classes[1][0]
         self.turn_line = {int(j): l for l, j in enumerate(tc.parent_close)}
-        self.cache, self.sums = {}, {}
+        self.cache, self.sums, self.quick = {}, {}, {}
+        self.progress = {"active": False}
         self.lock = threading.Lock()
         (trunk / "river_cache").mkdir(exist_ok=True)
         grade = trunk / "grade.json"
@@ -170,6 +171,9 @@ class Viewer:
         rc = up.classes[2][c]
         tp, contrib = line_template(rc.template, l), float(rc.contrib[l])
         out, stats = {}, np.zeros((2, 3))
+        t0 = time.perf_counter()
+        self.progress = {"active": True, "part": 0, "parts": 2, "fraction": 0.0, "iterations": 0, "seconds": 0.0,
+                         "text": "building the river's card tables"}
         for p in (0, 1):
             o = 1 - p
             rp = np.where(valid, reach[p], 0.0)
@@ -178,14 +182,71 @@ class Viewer:
                 continue
             g = GpuGadget(sums, tp, contrib, rp / m, np.where(valid, self.cfv[o, d, i], 0.0) / (kt * m), p,
                           dtype=torch.float32, device=self.device)
-            ev = g.solve(self.iters, 2.0 * self.tol * 2.0 * contrib, 10)
+            ev = self._run(g, 2.0 * self.tol * 2.0 * contrib, p, 2, t0)
             stats[p] = (ev["iterations"], ev["exploitability"], g.seconds)
             for k, s in enumerate(g.average_strategy()):
                 if tp.players[k] == p:
                     out[f"k{k}"] = s.cpu().numpy().astype(np.float16)
             del g
         out["stats"] = stats
+        self.progress = {"active": False}
         return out
+
+    def _run(self, g, tol: float, part: int, parts: int, t0: float) -> dict:
+        """g.solve(self.iters, tol, 10), reporting progress: how far the gap has come from its
+        first value to the tolerance, on a log scale."""
+        first, ev = None, None
+        frac = 0.0
+        while g.t < self.iters:
+            for _ in range(5):  # the grade's check every 10 iterations, reported every 2
+                g.iterate(2)
+                self.progress = {"active": True, "part": part, "parts": parts,
+                                 "fraction": float(frac if first is not None else 0.04 * g.t),
+                                 "iterations": g.t, "seconds": time.perf_counter() - t0,
+                                 "text": f"P{part}'s solve: iteration {g.t}"}
+            ev = g.evaluate()
+            gap = max(float(ev["exploitability"]), 1e-30)
+            first = gap if first is None else first
+            frac = 1.0 if gap <= tol else (0.0 if first <= tol else
+                                           min(1.0, max(0.0, np.log(first / gap) / np.log(first / tol))))
+            self.progress = {"active": True, "part": part, "parts": parts, "fraction": float(frac),
+                             "iterations": g.t, "seconds": time.perf_counter() - t0,
+                             "text": f"P{part}'s solve: iteration {g.t}, gap {gap:.3g} chips, target {tol:.3g}"}
+            if gap <= tol:
+                break
+        ev["iterations"] = g.t
+        return ev
+
+    def solve_quick(self, d: int, c: int, l: int, i: int, r: int, reach) -> dict:
+        """One river deal alone, solved from both players' ranges (no gadget, so without the
+        re-solve's guarantee; not what the grade measures). {"k<node>": (1, H, A)} and stats."""
+        import torch
+
+        from bombpot.valuenet.gpu_subgame import GpuSubgame
+
+        key = (d, i, r)
+        with self.lock:
+            if key in self.quick:
+                return self.quick[key]
+            up, river = self.upper, self.river
+            st = river.street(np.array([d]), np.array([r]))
+            st.kappa = np.full(1, river.scale)
+            valid = np.asarray(up.streets[1].valid[d], bool)
+            rc = up.classes[2][c]
+            tp, contrib = line_template(rc.template, l), float(rc.contrib[l])
+            roots = [np.where(valid, x, 0.0) for x in reach]
+            out = {"stats": np.zeros((2, 3))}
+            if roots[0].sum() > 0 and roots[1].sum() > 0:
+                g = GpuSubgame(st, tp, contrib, roots[0] / roots[0].sum(), roots[1] / roots[1].sum(),
+                               dtype=torch.float32, device="cpu")
+                ev = g.solve(self.iters, self.tol * 2.0 * contrib, 10)
+                out["stats"][:] = (ev["iterations"], ev["exploitability"], g.seconds / 2)
+                for k, x in enumerate(g.average_strategy()):
+                    out[f"k{k}"] = x.cpu().numpy()
+            self.quick[key] = out
+            while len(self.quick) > 200:
+                self.quick.pop(next(iter(self.quick)))
+            return out
 
     # One public state ----------------------------------------------------------------------
 
@@ -269,8 +330,13 @@ class Viewer:
         if ra_ == rb_ or {ra_, rb_} & public:
             raise ValueError("those river cards are not available")
         t0 = time.perf_counter()
-        sol = self.solve_river(d, c, l2, i, [r.copy() for r in reach])
         r = self.river_child(d, ra_, rb_)
+        quick = q.get("mode") == "quick"
+        if quick:
+            sol = self.solve_quick(d, c, l2, i, r, [x.copy() for x in reach])
+            r = 0
+        else:
+            sol = self.solve_river(d, c, l2, i, [x.copy() for x in reach])
         boards[0].append(ra_), boards[1].append(rb_)
         public |= {ra_, rb_}
 
@@ -281,7 +347,8 @@ class Viewer:
             return x / np.maximum(x.sum(-1, keepdims=True), 1e-30)
 
         extra = {"resolve": {"iterations": sol["stats"][:, 0].tolist(), "gap": sol["stats"][:, 1].tolist(),
-                             "seconds": sol["stats"][:, 2].tolist(), "waited": time.perf_counter() - t0}}
+                             "seconds": sol["stats"][:, 2].tolist(), "waited": time.perf_counter() - t0,
+                             "mode": "quick" if quick else "exact"}}
         kind, x, hist = walk(2, tp, contrib, stack, ra, strat)
         if kind == "node":
             return node(2, tp, x, contrib, stack, strat, extra)
@@ -318,6 +385,8 @@ def serve(viewer: Viewer, port: int) -> None:
                     return self.send(200, page, "text/html; charset=utf-8")
                 if u.path == "/api/meta":
                     return self.send(200, json.dumps(viewer.meta()).encode(), "application/json")
+                if u.path == "/api/progress":
+                    return self.send(200, json.dumps(viewer.progress).encode(), "application/json")
                 if u.path == "/api/state":
                     return self.send(200, json.dumps(viewer.state(q)).encode(), "application/json")
                 self.send(404, b"not found", "text/plain")

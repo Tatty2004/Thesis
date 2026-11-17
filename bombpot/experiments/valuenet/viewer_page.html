@@ -131,6 +131,9 @@ tr.off td { color: var(--muted); }
 .notes ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
 .status { font-size: 13px; color: var(--muted); padding: 9px 11px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-ink); }
 .status.err { background: none; color: var(--act-bet2); padding: 0; }
+.progress { height: 10px; border-radius: 5px; background: var(--sunk); overflow: hidden; margin-top: 8px; }
+.progress span { display: block; height: 100%; background: var(--accent); width: 0; transition: width 300ms ease; }
+.mode { margin-left: auto; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
 </style>
 </head>
 <body>
@@ -141,7 +144,8 @@ tr.off td { color: var(--muted); }
   </header>
 
   <section class="panel">
-    <div class="boards" id="boards"></div>
+    <div class="boards"><div class="boards" id="boards"></div>
+      <div class="mode"><div class="label">River solve</div><div class="seg" id="mode-toggle"></div></div></div>
     <div class="picker" id="picker" hidden style="margin-top:14px"></div>
   </section>
 
@@ -190,7 +194,7 @@ tr.off td { color: var(--muted); }
   const SLOT_NAMES = { tA: "turn A", tB: "turn B", rA: "river A", rB: "river B" };
 
   let meta = null, st = null, cells = null, token = 0;
-  const state = { fa: [], ta: [], ra: [], turn: [null, null], river: [null, null], view: "actor", picker: null, cell: 0 };
+  const state = { fa: [], ta: [], ra: [], turn: [null, null], river: [null, null], view: "actor", picker: null, cell: 0, mode: "exact" };
 
   function setStatus(text, err) { const s = $("status"); s.textContent = text || ""; s.hidden = !text; s.className = "status" + (err ? " err" : ""); }
   const fmt = (x) => String(+(+x).toFixed(2));
@@ -242,26 +246,29 @@ tr.off td { color: var(--muted); }
     const turn = state.turn[0] && state.turn[1], river = turn && state.river[0] && state.river[1];
     p.set("fa", state.fa.join(","));
     if (turn) { p.set("turn", state.turn[0] + state.turn[1]); p.set("ta", state.ta.join(",")); }
-    if (river) { p.set("river", state.river[0] + state.river[1]); p.set("ra", state.ra.join(",")); }
+    if (river) { p.set("river", state.river[0] + state.river[1]); p.set("ra", state.ra.join(",")); p.set("mode", state.mode); }
     return p;
   }
 
   async function load() {
     const mine = ++token, p = query();
-    const solving = p.has("river") && !(st && st.resolve) && !(st && st.need === "river" && st.solved);
-    const timer = setTimeout(() => setStatus(solving
-      ? "Solving this river for both players (every river card at once). The first visit to a turn and betting line takes a while; after that it is instant."
-      : "Loading…"), solving ? 0 : 400);
+    const solving = p.has("river") && state.mode === "exact" && !(st && st.resolve && st.resolve.mode === "exact")
+      && !(st && st.need === "river" && st.solved);
+    const timer = setTimeout(() => { if (solving) showProgress(null); else setStatus("Loading…"); }, solving ? 0 : 400);
+    const poll = solving ? setInterval(async () => {
+      try { const g = await (await fetch("/api/progress")).json(); if (mine === token && g.active) showProgress(g); } catch (e) { /* keep waiting */ }
+    }, 700) : null;
+    const stop = () => { clearTimeout(timer); if (poll) clearInterval(poll); };
     try {
       const r = await fetch("/api/state?" + p.toString());
       const j = await r.json();
-      clearTimeout(timer);
+      stop();
       if (mine !== token) return;
       if (j.error) throw new Error(j.error);
       st = j;
       setStatus("");
     } catch (e) {
-      clearTimeout(timer);
+      stop();
       if (mine !== token) return;
       setStatus("Couldn't load this spot: " + (e.message || e), true);
       return;
@@ -271,6 +278,25 @@ tr.off td { color: var(--muted); }
       state.picker = v[0] === null ? k[0] : k[1];
     }
     render();
+  }
+
+  function showProgress(g) {
+    const el = $("status"); el.hidden = false; el.className = "status";
+    const frac = g ? (g.part + g.fraction) / g.parts : 0;
+    el.innerHTML = "<strong>Solving this river exactly</strong> (both players, every river card for this turn and betting line; later visits are instant).<br>"
+      + (g ? g.text + " \u00b7 " + g.seconds.toFixed(0) + " s so far" : "starting…")
+      + '<div class="progress"><span style="width:' + (100 * frac).toFixed(1) + '%"></span></div>';
+  }
+
+  function renderMode() {
+    const el = $("mode-toggle"); el.innerHTML = "";
+    for (const [v, text, tip] of [["exact", "Exact (as graded)", "The safe re-solve the exploitability number is measured on: every river card at once, slow the first time."],
+                                  ["quick", "Quick (this river only)", "Solves just the river cards you picked from both ranges. Fast, but without the safe re-solve's guarantee, so it can differ from the graded strategy."]]) {
+      const b = document.createElement("button"); b.textContent = text; b.title = tip;
+      b.setAttribute("aria-pressed", String(state.mode === v));
+      b.addEventListener("click", () => { state.mode = v; renderMode(); if (state.river[0] && state.river[1]) load(); });
+      el.appendChild(b);
+    }
   }
 
   // Rendering --------------------------------------------------------------------------------
@@ -490,7 +516,7 @@ tr.off td { color: var(--muted); }
     el.appendChild(bar);
     const stats = document.createElement("div"); stats.className = "stats";
     let html = "<span>P" + actor + ' range: <span class="data">' + summary.inRange.toFixed(1) + "</span> of " + summary.combos + " combos</span><span>frequencies weighted by P" + actor + "'s range</span>";
-    if (st.resolve) html += '<span>river solve: <span class="data">' + st.resolve.iterations.map((x) => Math.round(x)).join(" / ") + "</span> iterations, <span class=\"data\">"
+    if (st.resolve) html += "<span>" + st.resolve.mode + ' river solve: <span class="data">' + st.resolve.iterations.map((x) => Math.round(x)).join(" / ") + "</span> iterations, <span class=\"data\">"
       + (st.resolve.seconds[0] + st.resolve.seconds[1]).toFixed(0) + " s</span></span>";
     stats.innerHTML = html;
     el.appendChild(stats);
@@ -522,7 +548,7 @@ tr.off td { color: var(--muted); }
   (async function start() {
     try {
       meta = await (await fetch("/api/meta")).json();
-      build(); renderChips();
+      build(); renderChips(); renderMode();
       load();
     } catch (e) { setStatus("Couldn't reach the viewer server: " + (e.message || e), true); }
   })();
