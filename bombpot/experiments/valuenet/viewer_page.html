@@ -194,7 +194,7 @@ tr.off td { color: var(--muted); }
   const SLOT_NAMES = { tA: "turn A", tB: "turn B", rA: "river A", rB: "river B" };
 
   let meta = null, st = null, cells = null, token = 0;
-  const state = { fa: [], ta: [], ra: [], turn: [null, null], river: [null, null], view: "actor", picker: null, cell: 0, mode: "exact" };
+  const state = { fa: [], ta: [], ra: [], turn: [null, null], river: [null, null], view: "actor", picker: null, cell: 0, mode: "quick" };
 
   function setStatus(text, err) { const s = $("status"); s.textContent = text || ""; s.hidden = !text; s.className = "status" + (err ? " err" : ""); }
   const fmt = (x) => String(+(+x).toFixed(2));

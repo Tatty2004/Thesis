@@ -111,7 +111,8 @@ class Viewer:
         self.turn_line = {int(j): l for l, j in enumerate(tc.parent_close)}
         self.cache, self.sums, self.quick = {}, {}, {}
         self.progress = {"active": False}
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()   # exact re-solves
+        self.qlock = threading.Lock()  # quick solves: never wait behind an exact one
         (trunk / "river_cache").mkdir(exist_ok=True)
         grade = trunk / "grade.json"
         self.grade = json.loads(grade.read_text()) if grade.exists() else None
@@ -225,7 +226,7 @@ class Viewer:
         from bombpot.valuenet.gpu_subgame import GpuSubgame
 
         key = (d, i, r)
-        with self.lock:
+        with self.qlock:
             if key in self.quick:
                 return self.quick[key]
             up, river = self.upper, self.river
