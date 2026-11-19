@@ -1,3 +1,29 @@
+# Value-net experiments
+
+## Real-deck solves and grades: use 300 iterations and re-solve tolerance 1e-3 (2026-11-18)
+
+`real_trunk.py` now defaults to `--iters 300` and `real_grade.py` to `--tol 1e-3`. Measured on
+Ah7c2d / KsKd9h with the attention HandSetNet retrained on round-1 on-policy data (exploitability,
+chips per hand):
+
+| trunk DCFR iterations | river re-solve tol 1e-2 | 3e-3 | 1e-3 |
+|---|---|---|---|
+| 100 (`real/attn_op1_r2`) | 0.0880 (full grade) | 0.044 (est.) | 0.032 (est.) |
+| 300 (`real/attn_op1_r2_it300`) | 0.0783 (full grade) | | 0.023 (est.) |
+
+- **The 1e-2 tolerance was most of the old grade (about 0.055 of 0.088).** At 1e-3 the gain
+  flattens out. Cost per turn deal: 1e-2 about 8 GPU-min, 3e-3 about 11, 1e-3 about 17 (A5000 /
+  A6000); a full 1e-3 grade is about 570 GPU-h. No re-solve hit the 5,000-iteration cap.
+- **300 iterations buy about 0.010 at either tolerance.** The trunk's exploitability against
+  the network is 0.0142 / 0.0070 / 0.0054 at 100 / 200 / 300 iterations (run 300 reproduces the
+  100-iteration run's checks exactly), so more iterations buy little.
+- What is left at 300 / 1e-3 (about 0.023) is mostly the network's error, plus the trunk's 0.005
+  and a little re-solve slack.
+- "est." = `real_grade_tol.py`: every 10th turn deal (207) re-solved at the tighter tolerance and
+  substituted into the full grade, the change scaled by 10 (first order; the best response is a
+  max, so the true value is probably a little higher). The script reproduces both full grades
+  exactly before substituting. Results: `results/valuenet/real/tol_sweep.json`, `tol_it300.json`.
+
 # Value-net training data: shard format
 
 Written by stream `subgame` (2026-11-09). Producer: `bombpot/experiments/valuenet/datagen.py`;

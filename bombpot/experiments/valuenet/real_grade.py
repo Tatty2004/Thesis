@@ -183,7 +183,8 @@ def main(argv=None):
     ap.add_argument("--trunk", required=True, help="a real_trunk output directory (strategy.npz, leafcfv.npy, roots.npy)")
     ap.add_argument("--part", help="i/n: re-solve the turn deals d with d %% n == i")
     ap.add_argument("--finish", action="store_true")
-    ap.add_argument("--tol", type=float, default=1e-2, help="re-solve tolerance, pots")
+    ap.add_argument("--tol", type=float, default=1e-3,
+                    help="re-solve tolerance, pots (1e-3 since 2026-11-18; 1e-2 left about 0.055 chips of slack, README)")
     ap.add_argument("--sub-iters", type=int, default=5000)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-minutes", type=float, help="stop starting new deals after this long (resume later)")
