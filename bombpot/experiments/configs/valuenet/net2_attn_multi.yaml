@@ -1,0 +1,38 @@
+# HandSetNet with attention (the net2_attn_op1 architecture) on random-range samples over many flop pairs
+# (results/valuenet/data/real_multi, one flop pair per sample, tol 1e-2; G.4 of PLAN_valuenet.md, 2026-11-18).
+# Held out: whole isomorphism classes of flop pairs (split flop_pair, salt real-multi-0, 5%); the G.4 test
+# pairs Td5c2s/As9h6c, AsKh4d/KdQdTd, KhJd9c/7h4c2c were drawn from that held-out side.
+data:
+  dir: /n/fs/ugrad/ug27/rb5709/Thesis/results/valuenet/data/real_multi
+  holdout_fraction: 0.05
+  block: 250
+  salt: real-multi-0
+  target: cfv
+  weight: range
+  split: flop_pair
+features:
+  method: hand_set
+  n_bins: 1035
+  board: onehot
+  num_ranks: 13
+  num_suits: 4
+model:
+  kind: set
+  zero_sum: true
+  depth: 3
+  width: 128
+  heads: 4
+train:
+  epochs: 1000
+  schedule: cosine_time
+  time_budget_minutes: 480
+  amp: true
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0
+  huber_delta: 1.0
+  seed: 0
+  threads: 8
+  device: cuda
+  buffer_blocks: 8
+  clip: 1.0
