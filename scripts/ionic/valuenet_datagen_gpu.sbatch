@@ -22,9 +22,16 @@ TOL=${TOL:-1e-2}
 OUT=${OUT:-results/valuenet/data}
 mkdir -p "$OUT"
 TASK=$(( ${SLURM_ARRAY_TASK_ID:-0} + ${OFFSET:-0} ))  # OFFSET: seeds past the 999 array-index cap
+if [ -n "${SEEDS:-}" ]; then  # SEEDS="812 840 ...": rerun these seeds, task i -> the i-th
+    L=($SEEDS); TASK=${L[${SLURM_ARRAY_TASK_ID:-0}]}
+fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 # Write to node-local disk and copy once at the end (one large write to scratch).
 LOCAL="${TMPDIR:-/tmp}/$USER-vn-$SLURM_JOB_ID-$TASK.h5"
-$PY -m bombpot.experiments.valuenet.datagen --n "$N" --seed "$TASK" --tol "$TOL" --solver gpu --dtype float32 \
-    --out "$LOCAL" --log-every "${LOG:-25}" ${EXTRA:-}
-cp "$LOCAL" "$OUT/shard_$(printf %04d "$TASK").h5" && rm -f "$LOCAL"
+# Copy only a finished shard; a failed run (e.g. a full /tmp, node016 on 2026-11-20) leaves nothing behind.
+if $PY -m bombpot.experiments.valuenet.datagen --n "$N" --seed "$TASK" --tol "$TOL" --solver gpu --dtype float32 \
+    --out "$LOCAL" --log-every "${LOG:-25}" ${EXTRA:-}; then
+    cp "$LOCAL" "$OUT/shard_$(printf %04d "$TASK").h5" && rm -f "$LOCAL"
+else
+    rc=$?; rm -f "$LOCAL"; exit $rc
+fi
