@@ -455,9 +455,11 @@ class GpuSubgame:
 
 
 def solve_subgame_gpu(street, template, contrib, reach0, reach1, variant: str = "dcfr", iters: int = 1000,
-                      tol: float | None = None, check_every: int = 10, dtype=torch.float32, device="cuda") -> Subgame:
-    """fused.solve_subgame_fused on a device (strategy left empty)."""
-    g = GpuSubgame(street, template, contrib, reach0, reach1, variant, dtype=dtype, device=device)
+                      tol: float | None = None, check_every: int = 10, dtype=torch.float32, device="cuda",
+                      fuse: bool | None = None) -> Subgame:
+    """fused.solve_subgame_fused on a device (strategy left empty). street: a CardStreet or its
+    StreetSums (reused across calls on one deal). fuse: as GpuSubgame."""
+    g = GpuSubgame(street, template, contrib, reach0, reach1, variant, dtype=dtype, device=device, fuse=fuse)
     ev = g.solve(iters, tol, check_every)
     return Subgame(ev["values"], ev["br_values"], [], ev["iterations"], ev["exploitability"],
                    ev["exploitability_raw"], ev["mass"], g.seconds, None)
@@ -578,12 +580,12 @@ class GpuGadget(GpuSubgame):
 
 def resolve_gpu(street, template, contrib, reach_p, cfv, player: int, variant: str = "dcfr", iters: int = 1000,
                 tol: float | None = None, check_every: int = 10, dtype=torch.float32, device="cuda",
-                keep_strategy: bool = False) -> dict:
+                keep_strategy: bool = False, fuse: bool | None = None) -> dict:
     """resolve.resolve (safe) for one one-line subgame on a device. Returns GpuGadget.evaluate's
     dict with `iterations`, `seconds` and, with keep_strategy, `strategy` ([k] (D, H, A) numpy:
     use p's nodes). `tol` bounds gap / mass (the gadget's NashConv over its mass, chips), as
     resolve's."""
-    g = GpuGadget(street, template, contrib, reach_p, cfv, player, variant, dtype=dtype, device=device)
+    g = GpuGadget(street, template, contrib, reach_p, cfv, player, variant, dtype=dtype, device=device, fuse=fuse)
     ev = g.solve(iters, tol, check_every)
     ev["seconds"] = g.seconds
     if keep_strategy:

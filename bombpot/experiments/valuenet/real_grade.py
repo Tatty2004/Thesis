@@ -94,7 +94,7 @@ def load_strategy(path, upper) -> list:
 
 
 def resolve_deal(upper, river, d: int, roots, cfv, tol: float, iters: int, variant: str = "dcfr", device="cuda",
-                 dtype=None, keep_strategy: bool = False, check_every: int = 10):
+                 dtype=None, keep_strategy: bool = False, check_every: int = 10, fuse: bool = False):
     """Every river line of turn deal d re-solved for both players.
 
     roots, cfv   (2, L, H): both players' reach at d's river roots, and their averaged leaf values
@@ -112,7 +112,7 @@ def resolve_deal(upper, river, d: int, roots, cfv, tol: float, iters: int, varia
     st = river.street(*river.all_children([d]))
     kt = float(turn.kappa[d])
     st.kappa = np.full(st.num_deals, river.scale)
-    sums = StreetSums(st, device, dtype)
+    sums = StreetSums(st, device, dtype, fuse=fuse)  # fuse: compiled updates (gpu_subgame), same numbers to rounding
     valid = np.asarray(turn.valid[d], bool)
     lines = river_lines(upper)
     H = roots.shape[-1]
@@ -188,6 +188,8 @@ def main(argv=None):
     ap.add_argument("--sub-iters", type=int, default=5000)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-minutes", type=float, help="stop starting new deals after this long (resume later)")
+    ap.add_argument("--fuse", action="store_true", help="compiled (torch.compile) re-solver updates: about 3x faster, "
+                                                        "the same numbers to rounding")
     a = ap.parse_args(argv)
     trunk = Path(a.trunk)
     out = trunk / "grade"
@@ -215,7 +217,7 @@ def main(argv=None):
                 break
             t1 = time.perf_counter()
             done[d] = resolve_deal(upper, river, d, np.array(roots[:, d]), np.array(cfv[:, d]), a.tol, a.sub_iters,
-                                   device=a.device)
+                                   device=a.device, fuse=a.fuse)
             s = done[d][1]
             print(f"deal {d}: {time.perf_counter() - t1:.0f}s, {int(s[..., 0].sum())} iterations, "
                   f"largest gap / mass {s[..., 1].max():.4g} chips", flush=True)

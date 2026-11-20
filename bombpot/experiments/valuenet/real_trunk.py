@@ -82,6 +82,7 @@ def main(argv=None):
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-strategy", action="store_true")
     ap.add_argument("--amp", action="store_true", help="mixed precision for the network leaf")
+    ap.add_argument("--fuse", action="store_true", help="on-policy solves: compiled GPU updates (same numbers to rounding)")
     ap.add_argument("--defer", action="store_true",
                     help="write the drawn states to <out>/onpolicy_todo.npz and stop; solve them with --part")
     ap.add_argument("--part", help="i/n: no trunk solve; solve slice i of n of <out>/onpolicy_todo.npz "
@@ -198,6 +199,7 @@ def solve_states(a, game, upper, river, turn, equity, todo, out: Path) -> None:
         d, (pc, l, c) = int(todo["deal"][n]), (int(x) for x in todo["key"][n])
         if d != st_d:
             st, st_d = river_street(river, d), d
+            sums = None
         ci, lr = cont[(pc, l, c)]
         rc = upper.classes[2][ci]
         P = 2.0 * float(rc.contrib[lr])
@@ -206,9 +208,11 @@ def solve_states(a, game, upper, river, turn, equity, todo, out: Path) -> None:
         r0, r1 = (normalized(r, valid) for r in raw)
         tp = line_template(rc.template, lr)
         if a.solver == "gpu":
-            from bombpot.valuenet.gpu_subgame import solve_subgame_gpu
+            from bombpot.valuenet.gpu_subgame import StreetSums, solve_subgame_gpu
 
-            sub = solve_subgame_gpu(st, tp, P / 2, r0, r1, "dcfr", a.sub_iters, a.tol * P, dtype=torch.float32,
+            if sums is None:  # one index per deal, shared by its samples
+                sums = StreetSums(st, a.device, torch.float32, fuse=a.fuse)
+            sub = solve_subgame_gpu(sums, tp, P / 2, r0, r1, "dcfr", a.sub_iters, a.tol * P, dtype=torch.float32,
                                     device=a.device)
         else:
             from bombpot.core.solvers.fused import solve_subgame_fused

@@ -198,7 +198,7 @@ def turn_equity(st) -> np.ndarray:
 
 
 def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant: str = "cfr+",
-                 solver: str = "fused", dtype: str = "float64", device: str = "cuda") -> dict:
+                 solver: str = "fused", dtype: str = "float64", device: str = "cuda", fuse: bool = False) -> dict:
     """One sample: ranges, equity and the solved subgame (values and exploitability in pots).
     spot holds turn, template, pot and stack (sample_spot, then FlopPair.sample_betting).
     solver "fused" (core/solvers/fused.py: one compiled kernel per deal; in float64 the same
@@ -219,7 +219,7 @@ def solve_sample(fp: FlopPair, spot: dict, rng, tol: float, iters: int, variant:
         from bombpot.valuenet.gpu_subgame import solve_subgame_gpu
 
         sub = solve_subgame_gpu(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot,
-                                dtype=getattr(torch, dtype), device=device)
+                                dtype=getattr(torch, dtype), device=device, fuse=fuse)
     elif solver == "subgame" and dtype == "float64":
         sub = solve_subgame(st, spot["template"], pot / 2, r0, r1, variant, iters, tol * pot, stack=spot["stack"])
     else:
@@ -320,6 +320,8 @@ def main(argv=None):
                          "algorithm in torch on --device (valuenet/gpu_subgame.py; use --dtype float32)")
     ap.add_argument("--dtype", default="float64", choices=["float64", "float32"],
                     help="solver precision (float32: fused and gpu; values agree to rounding, not bit for bit)")
+    ap.add_argument("--fuse", action="store_true", help="solver gpu: compiled updates (about 3x faster, same numbers "
+                                                        "to rounding)")
     ap.add_argument("--threads", type=int, default=None, help="numba threads (default: NUMBA_NUM_THREADS)")
     ap.add_argument("--deck", default="13,4", help="ranks,suits (default the real deck)")
     ap.add_argument("--per-flop", type=int, default=1, help="samples per flop pair (each with its own turn)")
@@ -342,7 +344,7 @@ def main(argv=None):
              "ante": 1.0, "total_chips": STACK, "template": a.template, "spread": a.spread,
              "limit_pots": a.limit_pots, **betting,
              "tol_pots": a.tol, "iters_cap": a.iters,
-             "variant": a.variant, "solver": a.solver, "solver_dtype": a.dtype, "seed": a.seed, "flops_fixed": a.flops or "", "git": git_hash(), "per_flop": a.per_flop,
+             "variant": a.variant, "solver": a.solver, "solver_dtype": a.dtype, "solver_fuse": a.fuse, "seed": a.seed, "flops_fixed": a.flops or "", "git": git_hash(), "per_flop": a.per_flop,
              "card_encoding": "card = rank * num_suits + suit, ranks 23456789TJQKA, suits cdhs", "units": UNITS}
     fixed = None
     if a.flops:
@@ -368,7 +370,7 @@ def main(argv=None):
             spot["flops"], spot["turn"] = fp.game.flops, (int(rest[0]), int(rest[1]))
         spot.update(fp.sample_betting(rng, a.spread))
         t0 = time.perf_counter()
-        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.variant, a.solver, a.dtype, a.device)
+        row = solve_sample(fp, spot, rng, a.tol, a.iters, a.variant, a.solver, a.dtype, a.device, a.fuse)
         row.update(flops=np.array(spot["flops"]), turn=np.array(spot["turn"]), hand_set=hand_set, pot=spot["pot"],
                    stack=spot["stack"], line=spot["line"], pot_spread=spot["pot_spread"],
                    seconds=time.perf_counter() - t0)
