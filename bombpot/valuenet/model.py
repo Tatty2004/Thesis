@@ -123,10 +123,10 @@ class SetBlock(nn.Module):
         self.attn = nn.MultiheadAttention(d, heads, batch_first=True) if heads else None
         self.out = nn.Sequential(nn.GELU(), nn.Linear(d, d), nn.Dropout(dropout))
 
-    def forward(self, h, g, w, inc, possible):
+    def forward(self, h, g, w, inc, possible, full: bool = False):
         """h (N, H, d), g (N, d), w (N, H, 3) pooling weights (range0, range1, uniform over
         the possible hands), inc (N, H, cards) 1 where the hand holds the card, possible
-        (N, H) bool."""
+        (N, H) bool; full: every hand is possible (attention then needs no mask)."""
         z = self.norm(h)
         N, H, d = z.shape
         pooled = torch.einsum("nhk,nhd->nkd", w, z).reshape(N, 3 * d)
@@ -136,7 +136,7 @@ class SetBlock(nn.Module):
             per_card = torch.bmm(inc.transpose(1, 2), zw)
             u = u + self.card(torch.bmm(inc, per_card) * (self.num_cards / 4))
         if self.attn is not None:
-            u = u + self.attn(z, z, z, key_padding_mask=~possible, need_weights=False)[0]
+            u = u + self.attn(z, z, z, key_padding_mask=None if full else ~possible, need_weights=False)[0]
         return h + self.out(u)
 
 
@@ -147,6 +147,7 @@ class HandSetNet(nn.Module):
 
     chunk = 128
     per_hand = True  # forward needs hx and hc
+    compact = True   # in eval mode, run on the possible hands only when every row has as many
 
     def __init__(self, features: FeatureConfig, config: ModelConfig = ModelConfig(kind="set", depth=4, width=256)):
         super().__init__()
@@ -169,7 +170,25 @@ class HandSetNet(nn.Module):
     def forward(self, board, scalars, h0, h1, hx, hc):
         """board, scalars as ValueNet; h0 / h1 (N, H) the two ranges; hx (N, H, HAND_FEATURES)
         from features.hand_features; hc (N, H, 2) card ids -> (v0, v1), each (N, H), in pots.
-        Hands that can't be held (hx[..., 2] = 0) get no weight in any pooling."""
+        Hands that can't be held (hx[..., 2] = 0) get no weight in any pooling, so nothing
+        about them changes the others' outputs. In eval mode (with `compact`), when every row
+        has the same number n < H of possible hands (as at the turn's end: C(44, 2) of C(46, 2)),
+        the network runs on those n hands only (the same outputs there, to rounding; attention
+        needs no mask then) and the impossible hands get 0."""
+        if self.compact and not self.training and h0.shape[0] > 0:
+            possible = hx[..., 2] > 0
+            cnt = possible.sum(-1)
+            lo, hi = (int(x) for x in torch.aminmax(cnt))
+            if lo == hi and 0 < lo < h0.shape[1]:
+                idx = torch.sort((~possible).to(torch.uint8), dim=-1, stable=True).indices[:, :lo]
+                take = lambda x: torch.gather(x, 1, idx if x.dim() == 2 else
+                                              idx.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+                v0, v1 = self._forward(board, scalars, take(h0), take(h1), take(hx), take(hc), True)
+                z = torch.zeros(h0.shape, dtype=v0.dtype, device=v0.device)
+                return z.scatter(1, idx, v0), z.scatter(1, idx, v1)
+        return self._forward(board, scalars, h0, h1, hx, hc, False)
+
+    def _forward(self, board, scalars, h0, h1, hx, hc, full: bool):
         dt = h0.dtype
         hc = hc.long()
         hx = hx.to(dt)
@@ -190,7 +209,7 @@ class HandSetNet(nn.Module):
         w = torch.stack([mass[0], mass[1], possible.to(dt) / count], -1)
         inc = nn.functional.one_hot(hc, self.features.num_cards).sum(2).to(dt)
         for block in self.blocks:
-            h = block(h, g, w, inc, possible)
+            h = block(h, g, w, inc, possible, full)
         v0, v1 = self.dec(h).to(dt).unbind(-1)  # the correction in the inputs' precision (autocast)
         if self.config.zero_sum:
             with torch.autocast(v0.device.type, enabled=False):

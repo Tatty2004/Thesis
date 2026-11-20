@@ -86,6 +86,22 @@ def test_shapes_zero_sum_and_impossible_hands(mc):
 
 
 @pytest.mark.parametrize("heads", [0, 2])
+def test_compact_matches_the_full_hand_list(heads):
+    """Every row has C(7, 2) possible hands of the C(9, 2): in eval mode the network runs on those
+    only, with the same outputs there as on the full list, and 0 at the others."""
+    torch.manual_seed(4)
+    model = HandSetNet(CFG, ModelConfig(kind="set", depth=2, width=24, heads=heads)).double().eval()
+    t, _, _ = sample(CFG, 6, seed=5)
+    possible = t["hx"][..., 2] > 0
+    assert (possible.sum(-1) == 21).all()
+    v0, v1 = run(model, t)
+    model.compact = False
+    w0, w1 = run(model, t)
+    assert torch.allclose(v0[possible], w0[possible], atol=1e-12) and torch.allclose(v1[possible], w1[possible], atol=1e-12)
+    assert (v0[~possible] == 0).all() and (v1[~possible] == 0).all()
+
+
+@pytest.mark.parametrize("heads", [0, 2])
 def test_permutation_equivariance(heads):
     torch.manual_seed(1)
     model = HandSetNet(CFG, ModelConfig(kind="set", depth=3, width=24, heads=heads)).double().eval()
