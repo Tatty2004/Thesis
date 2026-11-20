@@ -92,12 +92,85 @@ def sweep_index(street) -> dict:
             "cards": cards, "valid": np.asarray(street.valid, bool), "kappa": np.asarray(street.kappa, dtype=float)}
 
 
+_COMPILED: dict = {}
+
+
+def _compiled(key, make):
+    """torch.compile(make()) once per key (shapes are static: one graph per key and shape)."""
+    if key not in _COMPILED:
+        import torch._dynamo
+        torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 64)
+        _COMPILED[key] = torch.compile(make(), dynamic=False, fullgraph=True)
+    return _COMPILED[key]
+
+
+def _beats_body(x, validf, kv, order, gs, ge, pair_hand, cgs, cge, seg):
+    """StreetSums.beats as one function of its arrays (fused when compiled)."""
+    x = x * validf
+    T, D, H = x.shape
+    B = order.shape[1]
+    out = torch.zeros_like(x)
+
+    def take(a, idx):
+        return torch.gather(a, 2, idx.expand(T, -1, -1))
+
+    def prefix(y):
+        return torch.nn.functional.pad(torch.cumsum(y, dim=-1), (1, 0))
+
+    for b in range(B):
+        cs = prefix(take(x, order[:, b]))
+        w_all = take(cs, gs[:, b])
+        t_all = take(cs, ge[:, b]) - w_all
+        cp = prefix(take(x, pair_hand[:, b]))
+        lo = take(cp, cgs[:, b])
+        w_card = (lo - cp[:, :, seg]).view(T, D, H, 2).sum(-1)
+        t_card = (take(cp, cge[:, b]) - lo).view(T, D, H, 2).sum(-1)
+        out = out + (w_all - w_card) + 0.5 * (t_all - t_card + x)
+    return out * (kv / B)
+
+
+def _fold_body(x, validf, cards, kv):
+    x = x * validf
+    tot = x @ cards
+    return (x.sum(-1, keepdim=True) - tot @ cards.T + x) * kv
+
+
+def _make_node_update(mode: int, flush):
+    """One player node's backward step and regret update, fused: from its children's values
+    (each (D, H)) -> (V, regret, sigma, cum), as GpuSubgame.iterate does it unfused."""
+
+    def update(sigma, regret, cum, wk, w0, ps, ng, *children):
+        cv = torch.stack(children, dim=-1)
+        V = (sigma * cv).sum(-1)
+        cum = cum + (w0 * wk).unsqueeze(-1) * sigma
+        r = regret + (cv - V.unsqueeze(-1))
+        if mode == 1:
+            r = r.clamp(min=0.0)
+        elif mode == 2:
+            r = torch.where(r > 0, r * ps, r * ng)
+            if flush is not None:
+                r = torch.where((r < 0) & (r > flush), torch.zeros_like(r), r)
+        rp = r.clamp(min=0.0)
+        tot = rp.sum(-1, keepdim=True)
+        sig = torch.where(tot > 0, rp / torch.where(tot > 0, tot, torch.ones_like(tot)),
+                          torch.full_like(rp, 1.0 / rp.shape[-1]))
+        return V, r, sig, cum
+
+    return update
+
+
+def _sum_children(*children):
+    return torch.stack(children, dim=-1).sum(-1)
+
+
 class StreetSums:
     """The fold and showdown sums of one street on a device, for batches x (T, D, H) of
-    opponent reaches: core/removal's `fold` and `beats` (with the street's chance weight)."""
+    opponent reaches: core/removal's `fold` and `beats` (with the street's chance weight).
+    fuse: run them as compiled (torch.compile) functions."""
 
-    def __init__(self, street, device="cuda", dtype=torch.float32, index: dict | None = None):
+    def __init__(self, street, device="cuda", dtype=torch.float32, index: dict | None = None, fuse: bool = False):
         ix = sweep_index(street) if index is None else index
+        self.fuse = fuse
         self.device, self.dtype = torch.device(device), dtype
         for k in ("order", "gs", "ge", "pair_hand", "cgs", "cge", "seg"):
             setattr(self, k, torch.as_tensor(ix[k], device=self.device))
@@ -114,6 +187,8 @@ class StreetSums:
 
     def fold(self, x):
         """(T, D, H) reaches -> (T, D, H): kappa x the reach of the hands sharing no card with i."""
+        if self.fuse:
+            return _compiled("fold", lambda: _fold_body)(x, self.validf, self.cards, self.kv)
         x = x * self.validf
         tot = x @ self.cards  # (T, D, C) reach per card
         return (x.sum(-1, keepdim=True) - tot @ self.cards.T + x) * self.kv
@@ -121,6 +196,9 @@ class StreetSums:
     def beats(self, x):
         """(T, D, H) reaches -> (T, D, H): kappa x the mean over boards of (the reach i beats +
         half the reach i ties with), among the hands sharing no card with i."""
+        if self.fuse:
+            return _compiled("beats", lambda: _beats_body)(x, self.validf, self.kv, self.order, self.gs, self.ge,
+                                                            self.pair_hand, self.cgs, self.cge, self.seg)
         x = x * self.validf
         T = x.shape[0]
         out = torch.zeros_like(x)
@@ -150,10 +228,12 @@ class GpuSubgame:
     """
 
     def __init__(self, street, template, contrib, reach0, reach1, variant: str = "dcfr", alpha: float = 1.5,
-                 beta: float = 0.0, gamma: float = 2.0, dtype=torch.float32, device="cuda"):
+                 beta: float = 0.0, gamma: float = 2.0, dtype=torch.float32, device="cuda", fuse: bool | None = None):
+        """fuse: compiled node updates (torch.compile); default: as the StreetSums."""
         if variant not in VARIANTS:
             raise ValueError(f"unknown variant {variant!r}")
-        self.sums = street if isinstance(street, StreetSums) else StreetSums(street, device, dtype)
+        self.sums = street if isinstance(street, StreetSums) else StreetSums(street, device, dtype, fuse=bool(fuse))
+        self.fuse = self.sums.fuse if fuse is None else bool(fuse)
         self.device, self.dtype = self.sums.device, self.sums.dtype
         self.variant, self.alpha, self.beta, self.gamma = variant, alpha, beta, gamma
         self.player, self.nact, self.kind, self.target, self.coef = compile_template(template, contrib)
@@ -230,41 +310,85 @@ class GpuSubgame:
     def _children(self, k, V, tv):
         return [V[int(self.target[k, a])] if self.kind[k, a] == NODE else tv[(k, a)] for a in range(int(self.nact[k]))]
 
+    def _weights(self, n: int):
+        """The discounts of the next n iterations: per iteration (w0, ps, ng) as floats, and
+        for the fused path as a (3,) device tensor each."""
+        W = _discounts(self.variant, self.t + 1 + np.arange(n), self.alpha, self.beta, self.gamma)
+        rows = [(float(W[0][it]), float(W[1][it]), float(W[2][it])) for it in range(n)]
+        if not self.fuse:
+            return rows, [None] * n
+        Wd = torch.as_tensor(np.array(rows), device=self.device, dtype=self.dtype)
+        return rows, [Wd[it].clone() for it in range(n)]
+
+    def _own_root(self, q, root):
+        """root with player q's entry replaced by ones: one forward pass then gives the
+        opponent's reach (for the values) and q's own reach within the subgame (the averaging
+        weight, SubgameCFR.own_reach), since each player's reach only multiplies its own
+        probabilities."""
+        r = list(root)
+        r[q] = self._ones
+        return r
+
+    def _backward_update(self, q, reach, own, w, wd):
+        """Player q's backward pass from the reaches of _own_root and its regret and average
+        updates at its nodes (fused._iterate_kernel). own: an extra averaging weight per hand
+        (the gadget's F probability) or None. Returns V (q's values at every node)."""
+        w0, ps, ng = w
+        mode = VARIANTS[self.variant]
+        tv = self._terminal_values(q, self.sigma, reach)
+        within = reach[q]
+        V = [None] * self.K
+        if self.fuse:
+            upd = _compiled(("node", mode, self.flush), lambda: _make_node_update(mode, self.flush))
+            add = _compiled("sum", lambda: _sum_children)
+            for k in range(self.K - 1, -1, -1):
+                ch = self._children(k, V, tv)
+                if int(self.player[k]) != q:
+                    V[k] = add(*ch)
+                else:
+                    wk = within[k] if own is None else within[k] * own
+                    V[k], self.regret[k], self.sigma[k], self.cum[k] = upd(self.sigma[k], self.regret[k],
+                                                                           self.cum[k], wk, wd[0], wd[1], wd[2], *ch)
+            return V
+        inst = {}
+        for k in range(self.K - 1, -1, -1):
+            cv = torch.stack(self._children(k, V, tv), dim=-1)  # (D, H, A)
+            if int(self.player[k]) != q:
+                V[k] = cv.sum(-1)
+            else:
+                V[k] = (self.sigma[k] * cv).sum(-1)
+                inst[k] = cv - V[k][:, :, None]
+        for k, d in inst.items():
+            wk = within[k] if own is None else within[k] * own
+            self.cum[k] += (w0 * wk)[:, :, None] * self.sigma[k]
+            r = self.regret[k] + d
+            if mode == 1:
+                r = r.clamp_(min=0.0)
+            elif mode == 2:
+                r = torch.where(r > 0, r * ps, r * ng)
+                if self.flush is not None:
+                    r = torch.where((r < 0) & (r > self.flush), torch.zeros_like(r), r)
+            self.regret[k] = r
+            rp = r.clamp(min=0.0)
+            tot = rp.sum(-1, keepdim=True)
+            self.sigma[k] = torch.where(tot > 0, rp / torch.where(tot > 0, tot, torch.ones_like(tot)),
+                                        torch.full_like(rp, 1.0 / rp.shape[-1]))
+        return V
+
+    @property
+    def _ones(self):
+        if getattr(self, "_ones_t", None) is None:
+            self._ones_t = torch.ones((self.D, self.H), device=self.device, dtype=self.dtype)
+        return self._ones_t
+
     def iterate(self, n: int) -> None:
         """n alternating iterations (fused._iterate_kernel)."""
         start = time.perf_counter()
-        W = _discounts(self.variant, self.t + 1 + np.arange(n), self.alpha, self.beta, self.gamma)
-        ones = torch.ones((self.D, self.H), device=self.device, dtype=self.dtype)
-        mode = VARIANTS[self.variant]
+        rows, dev = self._weights(n)
         for it in range(n):
-            w0, ps, ng = float(W[0][it]), float(W[1][it]), float(W[2][it])
             for p in range(2):
-                reach = self._forward(self.sigma, self.root)
-                within = self._forward(self.sigma, (ones, ones))[p]  # the averaging weight (SubgameCFR.own_reach)
-                tv = self._terminal_values(p, self.sigma, reach)
-                V = [None] * self.K
-                inst = {}
-                for k in range(self.K - 1, -1, -1):
-                    cv = torch.stack(self._children(k, V, tv), dim=-1)  # (D, H, A)
-                    if int(self.player[k]) != p:
-                        V[k] = cv.sum(-1)
-                    else:
-                        V[k] = (self.sigma[k] * cv).sum(-1)
-                        inst[k] = cv - V[k][:, :, None]
-                for k, d in inst.items():
-                    self.cum[k] += (w0 * within[k])[:, :, None] * self.sigma[k]
-                    r = self.regret[k] + d
-                    if mode == 1:
-                        r = r.clamp_(min=0.0)
-                    elif mode == 2:
-                        r = torch.where(r > 0, r * ps, r * ng)
-                        if self.flush is not None:
-                            r = torch.where((r < 0) & (r > self.flush), torch.zeros_like(r), r)
-                    self.regret[k] = r
-                    rp = r.clamp(min=0.0)
-                    tot = rp.sum(-1, keepdim=True)
-                    self.sigma[k] = torch.where(tot > 0, rp / torch.where(tot > 0, tot, torch.ones_like(tot)),
-                                                torch.full_like(rp, 1.0 / rp.shape[-1]))
+                reach = self._forward(self.sigma, self._own_root(p, self.root))
+                self._backward_update(p, reach, None, rows[it], dev[it])
         self.t += n
         self._sync()
         self.seconds += time.perf_counter() - start
@@ -358,11 +482,12 @@ class GpuGadget(GpuSubgame):
     strategy stays defined for the hands it doesn't hold)."""
 
     def __init__(self, street, template, contrib, reach_p, cfv, player: int, variant: str = "dcfr",
-                 alpha: float = 1.5, beta: float = 0.0, gamma: float = 2.0, dtype=torch.float32, device="cuda"):
+                 alpha: float = 1.5, beta: float = 0.0, gamma: float = 2.0, dtype=torch.float32, device="cuda",
+                 fuse: bool | None = None):
         H = len(reach_p)
         r = [np.ones(H), np.ones(H)]
         r[player] = np.asarray(reach_p, dtype=float)
-        super().__init__(street, template, contrib, r[0], r[1], variant, alpha, beta, gamma, dtype, device)
+        super().__init__(street, template, contrib, r[0], r[1], variant, alpha, beta, gamma, dtype, device, fuse)
         self.p, self.o = player, 1 - player
         f64 = torch.float64
         self.cfv = torch.as_tensor(np.asarray(cfv, dtype=float), device=self.device, dtype=f64)
@@ -380,8 +505,7 @@ class GpuGadget(GpuSubgame):
 
     def iterate(self, n: int) -> None:
         start = time.perf_counter()
-        W = _discounts(self.variant, self.t + 1 + np.arange(n), self.alpha, self.beta, self.gamma)
-        ones = torch.ones((self.D, self.H), device=self.device, dtype=self.dtype)
+        rows, dev = self._weights(n)
         mode = VARIANTS[self.variant]
 
         def discounted(r, ps, ng, flush):
@@ -400,27 +524,12 @@ class GpuGadget(GpuSubgame):
                                torch.full_like(rp, 1.0 / rp.shape[-1]))
 
         for it in range(n):
-            w0, ps, ng = float(W[0][it]), float(W[1][it]), float(W[2][it])
+            w0, ps, ng = rows[it]
             for q in range(2):
                 follow = self.g_sig[:, 0]
-                reach = self._forward(self.sigma, self._root(follow))
-                within = self._forward(self.sigma, (ones, ones))[q]
+                reach = self._forward(self.sigma, self._own_root(q, self._root(follow)))
                 own = follow.to(self.dtype)[None, :] if q == self.o else None
-                tv = self._terminal_values(q, self.sigma, reach)
-                V = [None] * self.K
-                inst = {}
-                for k in range(self.K - 1, -1, -1):
-                    cv = torch.stack(self._children(k, V, tv), dim=-1)
-                    if int(self.player[k]) != q:
-                        V[k] = cv.sum(-1)
-                    else:
-                        V[k] = (self.sigma[k] * cv).sum(-1)
-                        inst[k] = cv - V[k][:, :, None]
-                for k, d in inst.items():
-                    wk = within[k] if own is None else within[k] * own
-                    self.cum[k] += (w0 * wk)[:, :, None] * self.sigma[k]
-                    self.regret[k] = discounted(self.regret[k] + d, ps, ng, self.flush)
-                    self.sigma[k] = matching(self.regret[k])
+                V = self._backward_update(q, reach, own, rows[it], dev[it])
                 if q == self.o:  # the gadget node: F pays o its root value, T pays cfv
                     w = V[0].double().sum(0)
                     value = self.g_sig[:, 0] * w + self.g_sig[:, 1] * self.cfv
