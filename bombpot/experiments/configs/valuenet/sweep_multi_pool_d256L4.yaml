@@ -1,0 +1,36 @@
+# G.4 net sweep (2026-11-19): net2_attn_multi on all of real_multi (799 shards) plus the 15 round-1 on-policy
+# shards of Ah7c2d/KsKd9h (real_multi_sweep), 14 h cosine. Variant: pool_d256L4 {'model': {'width': 256, 'depth': 4, 'heads': 0}}
+data:
+  dir: /n/fs/ugrad/ug27/rb5709/Thesis/results/valuenet/data/real_multi_sweep
+  holdout_fraction: 0.05
+  block: 250
+  salt: real-multi-0
+  target: cfv
+  weight: range
+  split: flop_pair
+features:
+  method: hand_set
+  n_bins: 1035
+  board: onehot
+  num_ranks: 13
+  num_suits: 4
+model:
+  kind: set
+  zero_sum: true
+  depth: 4
+  width: 256
+  heads: 0
+train:
+  epochs: 1000
+  schedule: cosine_time
+  time_budget_minutes: 840
+  amp: true
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0
+  huber_delta: 1.0
+  seed: 0
+  threads: 8
+  device: cuda
+  buffer_blocks: 8
+  clip: 1.0

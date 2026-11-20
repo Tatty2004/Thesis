@@ -21,7 +21,7 @@ N=${N:-700}
 TOL=${TOL:-1e-2}
 OUT=${OUT:-results/valuenet/data}
 mkdir -p "$OUT"
-TASK=${SLURM_ARRAY_TASK_ID:-0}
+TASK=$(( ${SLURM_ARRAY_TASK_ID:-0} + ${OFFSET:-0} ))  # OFFSET: seeds past the 999 array-index cap
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 # Write to node-local disk and copy once at the end (one large write to scratch).
 LOCAL="${TMPDIR:-/tmp}/$USER-vn-$SLURM_JOB_ID-$TASK.h5"
