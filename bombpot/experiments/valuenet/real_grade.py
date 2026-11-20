@@ -188,7 +188,7 @@ def main(argv=None):
     ap.add_argument("--sub-iters", type=int, default=5000)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-minutes", type=float, help="stop starting new deals after this long (resume later)")
-    ap.add_argument("--fuse", action="store_true", help="compiled (torch.compile) re-solver updates: about 3x faster, "
+    ap.add_argument("--fuse", action=argparse.BooleanOptionalAction, default=True, help="(default on; --no-fuse) compiled (torch.compile) re-solver updates: about 3x faster, "
                                                         "the same numbers to rounding")
     a = ap.parse_args(argv)
     trunk = Path(a.trunk)

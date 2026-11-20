@@ -320,7 +320,7 @@ def main(argv=None):
                          "algorithm in torch on --device (valuenet/gpu_subgame.py; use --dtype float32)")
     ap.add_argument("--dtype", default="float64", choices=["float64", "float32"],
                     help="solver precision (float32: fused and gpu; values agree to rounding, not bit for bit)")
-    ap.add_argument("--fuse", action="store_true", help="solver gpu: compiled updates (about 3x faster, same numbers "
+    ap.add_argument("--fuse", action=argparse.BooleanOptionalAction, default=True, help="(default on; --no-fuse) solver gpu: compiled updates (about 3x faster, same numbers "
                                                         "to rounding)")
     ap.add_argument("--threads", type=int, default=None, help="numba threads (default: NUMBA_NUM_THREADS)")
     ap.add_argument("--deck", default="13,4", help="ranks,suits (default the real deck)")
@@ -344,7 +344,7 @@ def main(argv=None):
              "ante": 1.0, "total_chips": STACK, "template": a.template, "spread": a.spread,
              "limit_pots": a.limit_pots, **betting,
              "tol_pots": a.tol, "iters_cap": a.iters,
-             "variant": a.variant, "solver": a.solver, "solver_dtype": a.dtype, "solver_fuse": a.fuse, "seed": a.seed, "flops_fixed": a.flops or "", "git": git_hash(), "per_flop": a.per_flop,
+             "variant": a.variant, "solver": a.solver, "solver_dtype": a.dtype, "solver_fuse": a.fuse and a.solver == "gpu", "seed": a.seed, "flops_fixed": a.flops or "", "git": git_hash(), "per_flop": a.per_flop,
              "card_encoding": "card = rank * num_suits + suit, ranks 23456789TJQKA, suits cdhs", "units": UNITS}
     fixed = None
     if a.flops:

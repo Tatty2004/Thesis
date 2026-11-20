@@ -82,7 +82,7 @@ def main(argv=None):
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-strategy", action="store_true")
     ap.add_argument("--amp", action="store_true", help="mixed precision for the network leaf")
-    ap.add_argument("--fuse", action="store_true", help="on-policy solves: compiled GPU updates (same numbers to rounding)")
+    ap.add_argument("--fuse", action=argparse.BooleanOptionalAction, default=True, help="(default on; --no-fuse) on-policy solves: compiled GPU updates (same numbers to rounding)")
     ap.add_argument("--defer", action="store_true",
                     help="write the drawn states to <out>/onpolicy_todo.npz and stop; solve them with --part")
     ap.add_argument("--part", help="i/n: no trunk solve; solve slice i of n of <out>/onpolicy_todo.npz "
