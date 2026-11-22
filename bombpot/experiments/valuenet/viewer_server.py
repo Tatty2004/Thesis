@@ -2,7 +2,7 @@
 viewer_pack's copy of it).
 
     python -m bombpot.experiments.valuenet.viewer_server --trunk <dir> [--device mps|cuda|cpu]
-        [--model net.pt] [--live-iters 300] [--cache <dir>]
+        [--model net.pt] [--live-iters 200] [--cache <dir>]
 
 then open http://localhost:8765. Two sources for the turn and the river, picked in the page:
 
@@ -541,7 +541,7 @@ def main(argv=None):
     ap.add_argument("--live-cfv", default="auto", choices=["auto", "avg", "backup", "onpolicy", "br"],
                     help="T values of the live turn re-solve (turn_resolve --cfv; auto: avg with turncfv.npy, "
                          "else backup)")
-    ap.add_argument("--live-iters", type=int, default=300, help="live turn re-solve iterations")
+    ap.add_argument("--live-iters", type=int, default=200, help="live turn re-solve iterations (gate T passed at 100 and 300)")
     ap.add_argument("--live-check-every", type=int, default=20)
     ap.add_argument("--live-simultaneous", action="store_true",
                     help="simultaneous updates in the live turn re-solve (one network pass per iteration)")
@@ -563,7 +563,8 @@ def main(argv=None):
     print(f"loaded {a.trunk} in {time.perf_counter() - t0:.0f}s; re-solves on {a.device}", flush=True)
     if a.warm:
         t0 = time.perf_counter()
-        print(f"live solver ready in {time.perf_counter() - t0:.0f}s: {viewer.live.describe()}", flush=True)
+        info = viewer.live.describe()
+        print(f"live solver ready in {time.perf_counter() - t0:.0f}s: {info}", flush=True)
     serve(viewer, a.port)
 
 

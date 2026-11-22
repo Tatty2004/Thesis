@@ -47,7 +47,7 @@ PYTHONPATH=$PWD /n/fs/scratch/rb5709/envs/torch/bin/python -m bombpot.experiment
     --trunk results/valuenet/real/<name> --out /n/fs/scratch/rb5709/viewer_pack/<name> [--model <net.pt>]
 ```
 
-The pack (measured on `g4pre_Td5c2s_As9h6c`: PACK_SIZE):
+The pack (measured on `g4pre_Td5c2s_As9h6c`: 7.16 GB, 6.66 GiB; packing took about a minute):
 
 | file | size | for |
 |---|---|---|
@@ -97,7 +97,7 @@ minute). Live options:
 
 | option | default | |
 |---|---|---|
-| `--live-iters` | 300 | turn re-solve iterations (gate T used 100 and 300) |
+| `--live-iters` | 200 | turn re-solve iterations (gate T passed at 100 and 300) |
 | `--live-simultaneous` | off | one network pass per iteration: about half the time per iteration, needs about 1.5x the iterations for the same gap |
 | `--live-check-every` | 20 | how often the gap is checked; the re-solve ends on the check with the smallest gap (`--live-last`: the last iterate's average) |
 | `--live-cfv` | auto | `avg`, `backup`, `onpolicy` or `br` |
@@ -106,13 +106,37 @@ minute). Live options:
 | `--cache` | the pack folder | where solved rivers and live results are kept (`river_cache/`, `live_cache/<tag>/`) |
 | `--warm` | off | load the network at start instead of on the first live request |
 
-If the live turn is too slow on the laptop, `--live-simultaneous --live-iters 200` is the next
-setting to try (timings below). Before a demo, click through the spots you plan to show: every
+If the live turn is too slow on the laptop, `--live-iters 100` or `--live-simultaneous` are the
+next settings to try (timings below). Before a demo, click through the spots you plan to show: every
 solve is cached.
 
 ## Measured
 
-TIMINGS
+`bench_live.py` through `Viewer.state` (what the page calls), trunk `g4pre_Td5c2s_As9h6c`, network
+`sweep_multi_d192L4` with AMP, T values `backup`, 4 random turn roots after three flop lines, wall
+seconds for both players' turn re-solves together, gadget gap in pots (median / max over both
+players and roots):
+
+| device | setting | live turn | gap median | gap max |
+|---|---|---|---|---|
+| RTX 2080 Ti (4 CPUs) | alternating 300, paired | 11.6 s | 6.5e-4 | 3.4e-3 |
+| | alternating 300, one after the other | 13.7 s | 6.5e-4 | 3.6e-3 |
+| | alternating 150, paired | 5.8 s | 1.2e-3 | 4.8e-3 |
+| | simultaneous 300, paired | 6.5 s | 1.1e-3 | 2.9e-3 |
+| | simultaneous 200, paired | 4.3 s | 2.2e-3 | 7.0e-3 |
+| 8 x86 CPU cores (no GPU) | simultaneous 100, paired | 62 s | | |
+CPU_ROWS
+
+The default (alternating 200, paired) is about 7.7 s on a 2080 Ti by interpolation. River on the
+2080 Ti after a live turn (checked-down turn, viewer `--tol 1e-2`): exact (all river cards, both
+players) 10-11 s the first time, including building the card tables; quick 0.3-0.8 s. One-time
+setup: about 10 s (game, network, flop strategy) plus about 10 s for the first live solve. Host
+memory 2.4 GB, GPU memory 3.8 GB at most (the exact river's card tables).
+
+The network is most of the turn's time on a GPU; on a CPU it is everything: a call takes about
+0.3 s on 8 cores against about 10 ms on the 2080 Ti, so on a machine without a usable GPU the
+live turn takes minutes. Pairing the players saves only 15% on the 2080 Ti because the turn tree
+(numpy, under Python's global lock) can't overlap between the two threads.
 
 Apple hardware (mps) is untested: the code keeps the network on the device and everything in
 float64 on the host (`turn_resolve.OnDevice` for the network, `gpu_subgame.HOST64` for the river
