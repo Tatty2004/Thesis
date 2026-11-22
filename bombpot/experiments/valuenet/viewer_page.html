@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strategy Viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: a solver workbench (the M1 viewer's). Boards and the action path across the top, the
+   13x13 hand grid on the left, the node's actions, summary and combo inspector beside it. */
+:root {
+  --bg: #eef1f4; --surface: #ffffff; --sunk: #e3e8ee; --line: #cfd6df; --ink: #18212b; --muted: #5d6b7a;
+  --accent: #2e5d8a; --card: #fbfcfd;
+  --suit-s: #1d2630; --suit-h: #c4302b; --suit-d: #1f63c6; --suit-c: #23864a;
+  --act-fold: #5f8bb8; --act-call: #3c9a68; --act-bet1: #e0564e; --act-bet2: #b32a2a; --act-allin: #6e1219;
+  --range: #6c7f95; --blocked: #d8dde3; --focus: #2e5d8a; --warn-bg: #fff4e0; --warn-ink: #7a4b00;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12171d; --surface: #1a2129; --sunk: #232c36; --line: #333f4c; --ink: #e6ebf0; --muted: #98a6b5;
+    --accent: #7fb0e0; --card: #f1f3f5;
+    --act-fold: #6f9bcb; --act-call: #4fb37e; --act-bet1: #ec6a61; --act-bet2: #c03636; --act-allin: #7f1a22;
+    --range: #8296ad; --blocked: #2a333d; --focus: #7fb0e0; --warn-bg: #3a2c12; --warn-ink: #f2cf8f;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.45; padding: 20px 16px 40px; }
+.wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+button { font: inherit; color: inherit; }
+button:focus-visible, .cell:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.data { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 20px; }
+h1 { font-family: var(--font-display); font-stretch: 80%; font-weight: 750; font-size: 26px; letter-spacing: -0.01em; margin: 0; }
+h1 small { font-weight: 500; color: var(--muted); font-size: 15px; font-stretch: 100%; margin-left: 6px; letter-spacing: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-family: var(--font-data); font-size: 12px; padding: 3px 8px; border-radius: 4px; background: var(--sunk); color: var(--muted); }
+.chip.warn { background: var(--warn-bg); color: var(--warn-ink); }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; }
+.label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+
+.boards { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: flex-end; }
+.board { display: flex; flex-direction: column; gap: 6px; }
+.cards { display: flex; gap: 5px; align-items: center; }
+.cards .gap { width: 6px; }
+.pc {
+  width: 40px; height: 54px; border-radius: 5px; background: var(--card); border: 1px solid #b9c2cc;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1;
+  font-family: var(--font-display); font-weight: 700; font-size: 19px; box-shadow: 0 1px 0 rgba(0,0,0,0.08);
+}
+.pc .s { font-size: 15px; margin-top: 2px; }
+.pc.s-s { color: var(--suit-s); } .pc.s-h { color: var(--suit-h); } .pc.s-d { color: var(--suit-d); } .pc.s-c { color: var(--suit-c); }
+button.slot { cursor: pointer; padding: 0; }
+.slot.empty { background: transparent; border: 1.5px dashed var(--line); color: var(--muted); font-size: 10px; font-weight: 600; font-family: var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; box-shadow: none; }
+.slot.active { outline: 2px solid var(--accent); outline-offset: 2px; }
+.slot.later { opacity: 0.55; }
+
+.picker { display: flex; flex-direction: column; gap: 8px; }
+.picker-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: baseline; }
+.picker-grid { display: grid; grid-template-columns: repeat(13, minmax(0, 1fr)); gap: 4px; max-width: 620px; }
+.pick {
+  aspect-ratio: 3 / 4; max-width: 100%; border-radius: 4px; border: 1px solid #b9c2cc; background: var(--card); cursor: pointer;
+  font-family: var(--font-display); font-weight: 700; font-size: 13px; padding: 0; line-height: 1.05;
+}
+.pick:disabled { cursor: not-allowed; opacity: 0.18; }
+.pick.s-s { color: var(--suit-s); } .pick.s-h { color: var(--suit-h); } .pick.s-d { color: var(--suit-d); } .pick.s-c { color: var(--suit-c); }
+.linkbtn { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; font-size: 13px; }
+
+.path { display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; font-size: 13px; }
+.path .street { font-weight: 700; margin-left: 6px; }
+.path button.step { background: var(--sunk); border: 1px solid transparent; border-radius: 4px; padding: 2px 7px; cursor: pointer; }
+.path button.step:hover { border-color: var(--line); }
+.path .sep { color: var(--muted); }
+
+.main { display: grid; grid-template-columns: minmax(0, 600px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr); } }
+
+.grid-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { background: var(--surface); border: none; padding: 5px 10px; cursor: pointer; font-size: 12.5px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+
+.hand-grid { display: grid; grid-template-columns: repeat(13, minmax(0, 1fr)); gap: 2px; }
+.cell { position: relative; aspect-ratio: 1; max-width: 100%; background: var(--sunk); border-radius: 2px; overflow: hidden; cursor: pointer; border: none; padding: 0; display: block; }
+.cell .fill { position: absolute; left: 0; right: 0; bottom: 0; display: flex; }
+.cell .fill span { display: block; height: 100%; }
+.cell .lab { position: absolute; left: 3px; top: 2px; font-family: var(--font-data); font-size: 11px; font-weight: 600; color: var(--ink); text-shadow: 0 0 2px var(--surface), 0 0 2px var(--surface); }
+.cell.blocked { background: repeating-linear-gradient(135deg, var(--blocked) 0 4px, transparent 4px 8px); cursor: default; }
+.cell.blocked .lab { color: var(--muted); opacity: 0.6; }
+.cell.selected { outline: 2px solid var(--ink); outline-offset: -1px; z-index: 1; }
+@media (max-width: 520px) { .cell .lab { font-size: 8.5px; left: 1px; top: 1px; } }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.node-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; align-items: baseline; }
+.node-head h2 { font-family: var(--font-display); font-stretch: 85%; font-size: 19px; margin: 0; font-weight: 700; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.act { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 104px; padding: 7px 11px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; border-left: 5px solid var(--c); }
+.act:hover { background: var(--sunk); }
+.act b { font-size: 14px; }
+.act .data { font-size: 12px; color: var(--muted); }
+.bar { display: flex; height: 22px; border-radius: 4px; overflow: hidden; margin-top: 12px; background: var(--sunk); }
+.bar span { display: block; height: 100%; }
+.stats { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.notice { margin-top: 10px; padding: 9px 11px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-ink); font-size: 13px; }
+
+.insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.insp-head h3 { margin: 0; font-family: var(--font-display); font-size: 17px; font-stretch: 85%; }
+.combos { overflow-x: auto; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 5px 6px; border-bottom: 1px solid var(--sunk); white-space: nowrap; vertical-align: middle; }
+td.num, th.num { text-align: right; }
+tr.off td { color: var(--muted); }
+.mini { display: flex; width: 90px; height: 10px; border-radius: 2px; overflow: hidden; background: var(--sunk); }
+.mini span { display: block; height: 100%; }
+.combo-name { font-family: var(--font-data); font-weight: 600; }
+.combo-name .h { color: var(--suit-h); } .combo-name .d { color: var(--suit-d); } .combo-name .c { color: var(--suit-c); }
+
+.notes { font-size: 13px; color: var(--muted); max-width: 75ch; }
+.notes h2 { font-family: var(--font-display); font-stretch: 85%; color: var(--ink); font-size: 16px; margin: 0 0 6px; }
+.notes ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.status { font-size: 13px; color: var(--muted); padding: 9px 11px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-ink); }
+.status.err { background: none; color: var(--act-bet2); padding: 0; }
+.progress { height: 10px; border-radius: 5px; background: var(--sunk); overflow: hidden; margin-top: 8px; }
+.progress span { display: block; height: 100%; background: var(--accent); width: 0; transition: width 300ms ease; }
+.mode { margin-left: auto; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Strategy Viewer <small>double-board Hold'em bomb pot, no-limit</small></h1>
+    <div class="chips" id="chips"><span class="chip">loading…</span></div>
+  </header>
+
+  <section class="panel">
+    <div class="boards"><div class="boards" id="boards"></div>
+      <div class="mode"><div class="label">River solve</div><div class="seg" id="mode-toggle"></div></div></div>
+    <div class="picker" id="picker" hidden style="margin-top:14px"></div>
+  </section>
+
+  <section class="panel">
+    <div class="label" style="margin-bottom:6px">Action path</div>
+    <div class="path" id="path"></div>
+  </section>
+
+  <div class="status" id="status" role="status" hidden></div>
+
+  <div class="main">
+    <section class="panel">
+      <div class="grid-head">
+        <div class="label" id="grid-title">Strategy</div>
+        <div class="seg" id="view-toggle"></div>
+      </div>
+      <div class="hand-grid" id="grid" role="grid" aria-label="Hand grid"></div>
+      <div class="legend" id="legend"></div>
+    </section>
+    <div class="side">
+      <section class="panel" id="node"></section>
+      <section class="panel" id="inspector"></section>
+    </div>
+  </div>
+
+  <section class="notes">
+    <h2>Reading this page</h2>
+    <ul>
+      <li>The flop and turn show the solver's stored <strong>average strategy</strong>, one row per individual hand (no buckets).</li>
+      <li>The river is not stored. The first time you reach a river for a given turn and betting line, it is solved on this machine for both players and all river cards at once; after that it is instant.</li>
+      <li>Betting is no-limit with an ante of 1 and 100 behind: a bet of half the pot or the pot, and one raise per street. Each board is worth half the pot.</li>
+      <li>The flops are fixed. Pick the turn and river cards when the betting reaches them.</li>
+      <li>Bar height in a cell is the share of that hand class still in the shown player's range; the colors split it by action. Combos sharing a card with a board are left out, and a fully blocked cell is hatched.</li>
+      <li>Range weights multiply the player's own action probabilities along the path. Opponent card removal is not applied.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const RANKS = "23456789TJQKA", SUITS = "cdhs", GRID = "AKQJT98765432";
+  const SUIT_GLYPH = { c: "♣", d: "♦", h: "♥", s: "♠" };
+  const STREETS = ["Flop", "Turn", "River"];
+  const SLOT_NAMES = { tA: "turn A", tB: "turn B", rA: "river A", rB: "river B" };
+
+  let meta = null, st = null, cells = null, token = 0;
+  const state = { fa: [], ta: [], ra: [], turn: [null, null], river: [null, null], view: "actor", picker: null, cell: 0, mode: "quick" };
+
+  function setStatus(text, err) { const s = $("status"); s.textContent = text || ""; s.hidden = !text; s.className = "status" + (err ? " err" : ""); }
+  const fmt = (x) => String(+(+x).toFixed(2));
+
+  function kindOf(label) {
+    if (label.startsWith("Fold")) return "fold";
+    if (label.startsWith("Check") || label.startsWith("Call")) return "call";
+    if (label.startsWith("All-in")) return "allin";
+    return "bet";
+  }
+  // Fold blue, check / call green, the smaller bet or raise red, the larger darker red, all-in darkest.
+  function colorsOf(labels) {
+    const bets = labels.map((l, i) => kindOf(l) === "bet" ? i : -1).filter((i) => i >= 0);
+    return labels.map((l, i) => {
+      const k = kindOf(l);
+      if (k === "fold") return "var(--act-fold)";
+      if (k === "call") return "var(--act-call)";
+      if (k === "allin") return "var(--act-allin)";
+      return bets.indexOf(i) === 0 ? "var(--act-bet1)" : "var(--act-bet2)";
+    });
+  }
+
+  function cardEl(s, cls) {
+    const el = document.createElement(cls && cls.includes("slot") ? "button" : "div");
+    el.className = "pc s-" + s[1] + " " + (cls || "");
+    el.innerHTML = "<span>" + (s[0] === "T" ? "10" : s[0]) + '</span><span class="s">' + SUIT_GLYPH[s[1]] + "</span>";
+    el.setAttribute("aria-label", s);
+    return el;
+  }
+  function comboHtml(h) {
+    return meta.hands[h].slice().reverse().map((s) => s[0] + '<span class="' + s[1] + '">' + s[1] + "</span>").join("");
+  }
+
+  function build() {
+    cells = Array.from({ length: 169 }, (_, i) => {
+      const r = Math.floor(i / 13), c = i % 13;
+      return { label: r === c ? GRID[r] + GRID[c] : r < c ? GRID[r] + GRID[c] + "s" : GRID[c] + GRID[r] + "o", hands: [] };
+    });
+    meta.hands.forEach(([a, b], h) => {
+      const ra = GRID.indexOf(a[0]), rb = GRID.indexOf(b[0]);
+      const hi = Math.min(ra, rb), lo = Math.max(ra, rb);
+      const i = hi === lo ? hi * 13 + lo : a[1] === b[1] ? hi * 13 + lo : lo * 13 + hi;
+      cells[i].hands.push(h);
+    });
+  }
+
+  function query() {
+    const p = new URLSearchParams();
+    const turn = state.turn[0] && state.turn[1], river = turn && state.river[0] && state.river[1];
+    p.set("fa", state.fa.join(","));
+    if (turn) { p.set("turn", state.turn[0] + state.turn[1]); p.set("ta", state.ta.join(",")); }
+    if (river) { p.set("river", state.river[0] + state.river[1]); p.set("ra", state.ra.join(",")); p.set("mode", state.mode); }
+    return p;
+  }
+
+  async function load() {
+    const mine = ++token, p = query();
+    const solving = p.has("river") && state.mode === "exact" && !(st && st.resolve && st.resolve.mode === "exact")
+      && !(st && st.need === "river" && st.solved);
+    const timer = setTimeout(() => { if (solving) showProgress(null); else setStatus("Loading…"); }, solving ? 0 : 400);
+    const poll = solving ? setInterval(async () => {
+      try { const g = await (await fetch("/api/progress")).json(); if (mine === token && g.active) showProgress(g); } catch (e) { /* keep waiting */ }
+    }, 700) : null;
+    const stop = () => { clearTimeout(timer); if (poll) clearInterval(poll); };
+    try {
+      const r = await fetch("/api/state?" + p.toString());
+      const j = await r.json();
+      stop();
+      if (mine !== token) return;
+      if (j.error) throw new Error(j.error);
+      st = j;
+      setStatus("");
+    } catch (e) {
+      stop();
+      if (mine !== token) return;
+      setStatus("Couldn't load this spot: " + (e.message || e), true);
+      return;
+    }
+    if (st.need && !state.picker) {
+      const k = st.need === "turn" ? ["tA", "tB"] : ["rA", "rB"], v = st.need === "turn" ? state.turn : state.river;
+      state.picker = v[0] === null ? k[0] : k[1];
+    }
+    render();
+  }
+
+  function showProgress(g) {
+    const el = $("status"); el.hidden = false; el.className = "status";
+    const frac = g ? (g.part + g.fraction) / g.parts : 0;
+    el.innerHTML = "<strong>Solving this river exactly</strong> (both players, every river card for this turn and betting line; later visits are instant).<br>"
+      + (g ? g.text + " \u00b7 " + g.seconds.toFixed(0) + " s so far" : "starting…")
+      + '<div class="progress"><span style="width:' + (100 * frac).toFixed(1) + '%"></span></div>';
+  }
+
+  function renderMode() {
+    const el = $("mode-toggle"); el.innerHTML = "";
+    for (const [v, text, tip] of [["exact", "Exact (as graded)", "The safe re-solve the exploitability number is measured on: every river card at once, slow the first time."],
+                                  ["quick", "Quick (this river only)", "Solves just the river cards you picked from both ranges. Fast, but without the safe re-solve's guarantee, so it can differ from the graded strategy."]]) {
+      const b = document.createElement("button"); b.textContent = text; b.title = tip;
+      b.setAttribute("aria-pressed", String(state.mode === v));
+      b.addEventListener("click", () => { state.mode = v; renderMode(); if (state.river[0] && state.river[1]) load(); });
+      el.appendChild(b);
+    }
+  }
+
+  // Rendering --------------------------------------------------------------------------------
+
+  function renderChips() {
+    const el = $("chips"); el.innerHTML = "";
+    const add = (text, cls) => { const s = document.createElement("span"); s.className = "chip " + (cls || ""); s.textContent = text; el.appendChild(s); };
+    add("solve " + meta.trunk);
+    add(meta.iterations + " iterations");
+    if (meta.flop_turn_exploitability !== null) add("vs network " + meta.flop_turn_exploitability.toFixed(4));
+    if (meta.grade) add("exact exploitability " + meta.grade.exploitability.toFixed(4));
+    add("river solved on " + meta.device, "warn");
+  }
+
+  function streetNow() { return st.street !== undefined ? st.street : (st.path.length ? st.path[st.path.length - 1].street : 0); }
+
+  function renderBoards() {
+    const box = $("boards"); box.innerHTML = "";
+    const slots = [["tA", "rA"], ["tB", "rB"]], street = streetNow();
+    ["A", "B"].forEach((name, b) => {
+      const div = document.createElement("div"); div.className = "board";
+      div.innerHTML = '<div class="label">Board ' + name + "</div>";
+      const row = document.createElement("div"); row.className = "cards";
+      meta.flops[b].slice().sort((x, y) => RANKS.indexOf(y[0]) - RANKS.indexOf(x[0])).forEach((c) => row.appendChild(cardEl(c)));
+      const g = document.createElement("span"); g.className = "gap"; row.appendChild(g);
+      slots[b].forEach((slot, j) => {
+        const val = (j === 0 ? state.turn : state.river)[b];
+        let el;
+        if (val === null) { el = document.createElement("button"); el.className = "pc slot empty"; el.textContent = j === 0 ? "Turn" : "River"; }
+        else el = cardEl(val, "slot");
+        const reached = j === 0 ? street >= 1 : street >= 2;
+        if (!reached && val === null) el.classList.add("later");
+        if (state.picker === slot) el.classList.add("active");
+        el.title = "Pick " + SLOT_NAMES[slot];
+        el.addEventListener("click", () => { state.picker = state.picker === slot ? null : slot; renderBoards(); });
+        row.appendChild(el);
+      });
+      div.appendChild(row); box.appendChild(div);
+    });
+    renderPicker();
+  }
+
+  function usedExcept(slot) {
+    const used = new Set(meta.flops.flat());
+    const all = { tA: state.turn[0], tB: state.turn[1], rA: state.river[0], rB: state.river[1] };
+    for (const [k, v] of Object.entries(all)) if (k !== slot && v !== null) used.add(v);
+    return used;
+  }
+
+  function renderPicker() {
+    const p = $("picker");
+    if (!state.picker) { p.hidden = true; return; }
+    p.hidden = false;
+    const slot = state.picker, used = usedExcept(slot);
+    p.innerHTML = '<div class="picker-head"><span><strong>Pick ' + SLOT_NAMES[slot] + '</strong> <span style="color:var(--muted)">· cards on a board or already picked are disabled</span></span></div>';
+    const grid = document.createElement("div"); grid.className = "picker-grid";
+    for (const suit of ["s", "h", "d", "c"]) {
+      for (let r = 12; r >= 0; r--) {
+        const s = RANKS[r] + suit;
+        const b = document.createElement("button");
+        b.className = "pick s-" + suit;
+        b.innerHTML = (s[0] === "T" ? "10" : s[0]) + "<br>" + SUIT_GLYPH[suit];
+        b.setAttribute("aria-label", s);
+        b.disabled = used.has(s);
+        b.addEventListener("click", () => pickCard(slot, s));
+        grid.appendChild(b);
+      }
+    }
+    p.appendChild(grid);
+    const close = document.createElement("button"); close.className = "linkbtn"; close.textContent = "Close";
+    close.addEventListener("click", () => { state.picker = null; renderBoards(); });
+    p.querySelector(".picker-head").appendChild(close);
+  }
+
+  function pickCard(slot, c) {
+    if (slot[0] === "t") {
+      state.turn[slot === "tA" ? 0 : 1] = c;
+      state.river = [null, null]; state.ta = []; state.ra = [];
+      state.picker = state.turn[0] === null ? "tA" : state.turn[1] === null ? "tB" : null;
+    } else {
+      state.river[slot === "rA" ? 0 : 1] = c;
+      state.ra = [];
+      state.picker = state.river[0] === null ? "rA" : state.river[1] === null ? "rB" : null;
+    }
+    if (state.picker) { renderBoards(); return; }  // the other board's card is still missing
+    load();
+  }
+
+  function goTo(i) {  // keep the first i actions of the path
+    const n = [0, 0, 0];
+    st.path.slice(0, i).forEach((s) => n[s.street]++);
+    state.fa = state.fa.slice(0, n[0]); state.ta = state.ta.slice(0, n[1]); state.ra = state.ra.slice(0, n[2]);
+    state.picker = null;
+    load();
+  }
+
+  function renderPath() {
+    const el = $("path"); el.innerHTML = "";
+    const root = document.createElement("button"); root.className = "step"; root.textContent = "Start";
+    root.addEventListener("click", () => goTo(0)); el.appendChild(root);
+    let street = -1;
+    st.path.forEach((d, i) => {
+      if (d.street !== street) {
+        street = d.street;
+        const lab = document.createElement("span"); lab.className = "street"; lab.textContent = STREETS[d.street] + ":"; el.appendChild(lab);
+      } else { const sep = document.createElement("span"); sep.className = "sep"; sep.textContent = "·"; el.appendChild(sep); }
+      const b = document.createElement("button"); b.className = "step";
+      b.textContent = "P" + d.player + " " + d.label.toLowerCase();
+      b.title = "Go back to this decision";
+      b.addEventListener("click", () => goTo(i));
+      el.appendChild(b);
+    });
+    if (!st.terminal && st.street !== undefined && st.street !== street) {
+      const lab = document.createElement("span"); lab.className = "street"; lab.textContent = STREETS[st.street] + ":"; el.appendChild(lab);
+    }
+    const now = document.createElement("span"); now.style.color = "var(--muted)";
+    now.textContent = st.terminal ? " hand over" : st.need ? " waiting for the " + st.need + " cards" : " P" + st.player + " to act";
+    el.appendChild(now);
+  }
+
+  // One player's weights summed into the 169 classes, with the acting player's mix when given.
+  function gridOf(weights, mixes, A) {
+    let inRange = 0, combos = 0;
+    const summary = new Array(A).fill(0);
+    const out = cells.map((cell) => {
+      let possible = 0, weight = 0; const mix = new Array(A).fill(0);
+      for (const h of cell.hands) {
+        if (!st.possible[h]) continue;
+        possible++; weight += weights[h];
+        if (mixes) for (let a = 0; a < A; a++) mix[a] += weights[h] * mixes[h][a];
+      }
+      inRange += weight; combos += possible;
+      for (let a = 0; a < A; a++) { summary[a] += mix[a]; if (weight > 0) mix[a] /= weight; }
+      return { label: cell.label, hands: cell.hands, possible, weight, mix };
+    });
+    if (inRange > 0) for (let a = 0; a < A; a++) summary[a] /= inRange;
+    return { cells: out, inRange, combos, summary };
+  }
+
+  function render() {
+    renderBoards(); renderPath();
+    const atNode = !!st.actions, t = streetNow(), actor = atNode ? st.player : null;
+    let player, showMix;
+    if (atNode) { if (state.view !== "actor" && state.view !== "opp") state.view = "actor"; player = state.view === "actor" ? actor : 1 - actor; showMix = state.view === "actor"; }
+    else { if (state.view !== "p0" && state.view !== "p1") state.view = "p0"; player = state.view === "p1" ? 1 : 0; showMix = false; }
+    const A = atNode ? st.actions.length : 0, cols = atNode ? colorsOf(st.actions) : [];
+    const g = gridOf(st.reach[player], showMix ? st.strategy : null, A);
+    const summary = atNode ? (showMix ? g : gridOf(st.reach[actor], st.strategy, A)) : null;
+
+    const vt = $("view-toggle"); vt.innerHTML = "";
+    const opts = atNode ? [["actor", "P" + actor + " strategy"], ["opp", "P" + (1 - actor) + " range"]] : [["p0", "P0 range"], ["p1", "P1 range"]];
+    for (const [v, text] of opts) {
+      const b = document.createElement("button"); b.textContent = text;
+      b.setAttribute("aria-pressed", String(state.view === v));
+      b.addEventListener("click", () => { state.view = v; render(); });
+      vt.appendChild(b);
+    }
+    $("grid-title").textContent = "P" + player + (showMix ? " strategy" : " range") + " · " + STREETS[t].toLowerCase();
+
+    const gridEl = $("grid"); gridEl.innerHTML = "";
+    g.cells.forEach((cell, i) => {
+      const b = document.createElement("button"); b.className = "cell";
+      if (!cell.possible) b.classList.add("blocked");
+      if (i === state.cell) b.classList.add("selected");
+      const share = cell.possible ? cell.weight / cell.possible : 0;
+      if (share > 0) {
+        const fill = document.createElement("div"); fill.className = "fill"; fill.style.height = (100 * share).toFixed(2) + "%";
+        if (showMix) {
+          for (let a = 0; a < A; a++) {
+            if (cell.mix[a] <= 0) continue;
+            const sp = document.createElement("span"); sp.style.width = (100 * cell.mix[a]).toFixed(3) + "%"; sp.style.background = cols[a]; fill.appendChild(sp);
+          }
+        } else { const sp = document.createElement("span"); sp.style.width = "100%"; sp.style.background = "var(--range)"; fill.appendChild(sp); }
+        b.appendChild(fill);
+      }
+      const lab = document.createElement("span"); lab.className = "lab"; lab.textContent = cell.label; b.appendChild(lab);
+      b.addEventListener("click", () => { state.cell = i; render(); });
+      gridEl.appendChild(b);
+    });
+
+    const lg = $("legend"); lg.innerHTML = "";
+    if (showMix) st.actions.forEach((l, a) => { const s2 = document.createElement("span"); s2.innerHTML = '<i class="sw" style="background:' + cols[a] + '"></i>' + l; lg.appendChild(s2); });
+    else { const s2 = document.createElement("span"); s2.innerHTML = '<i class="sw" style="background:var(--range)"></i>share of the class in P' + player + "'s range"; lg.appendChild(s2); }
+    const hint = document.createElement("span"); hint.textContent = "bar height = share of the class still in range"; lg.appendChild(hint);
+
+    renderNode(atNode, actor, cols, summary, g, player, t);
+    renderInspector(g.cells[state.cell], cols, showMix, player, atNode, A);
+  }
+
+  function renderNode(atNode, actor, cols, summary, g, player, t) {
+    const el = $("node");
+    const pot = st.pot !== undefined ? "pot " + fmt(st.pot) : "";
+    if (st.terminal) {
+      el.innerHTML = '<div class="node-head"><h2>Hand over</h2><span class="data">' + pot + '</span></div><p style="margin:8px 0 0">' + st.terminal
+        + '. Go back with the action path, or start again.</p><div class="stats"><span>P' + player + ' range: <span class="data">' + g.inRange.toFixed(1) + "</span> of " + g.combos + " combos</span></div>";
+      return;
+    }
+    if (st.need) {
+      el.innerHTML = '<div class="node-head"><h2>' + STREETS[t] + ' · P0 to act</h2><span class="data">' + pot + '</span></div><div class="notice">Pick the ' + st.need
+        + " card for each board to see the " + STREETS[t].toLowerCase() + " strategy."
+        + (st.need === "river" ? (st.solved ? " This river spot is already solved, so it will be instant." : " This river spot has not been solved yet: picking the cards starts the solve.") : "") + "</div>"
+        + '<div class="stats"><span>P' + player + ' range: <span class="data">' + g.inRange.toFixed(1) + "</span> of " + g.combos + " combos</span></div>";
+      return;
+    }
+    const owe = Math.max(st.added[0], st.added[1]) - st.added[actor];
+    el.innerHTML = '<div class="node-head"><h2>' + STREETS[t] + " · P" + actor + ' to act</h2><span class="data">' + pot + (owe > 0 ? " · to call " + fmt(owe) : "") + "</span></div>";
+    const acts = document.createElement("div"); acts.className = "actions";
+    st.actions.forEach((l, a) => {
+      const b = document.createElement("button"); b.className = "act"; b.style.setProperty("--c", cols[a]);
+      b.innerHTML = "<b>" + l + '</b><span class="data">' + (100 * summary.summary[a]).toFixed(1) + "%</span>";
+      b.addEventListener("click", () => { (t === 0 ? state.fa : t === 1 ? state.ta : state.ra).push(a); state.picker = null; load(); });
+      acts.appendChild(b);
+    });
+    el.appendChild(acts);
+    const bar = document.createElement("div"); bar.className = "bar";
+    st.actions.forEach((l, a) => { const sp = document.createElement("span"); sp.style.width = (100 * summary.summary[a]) + "%"; sp.style.background = cols[a]; sp.title = l + " " + (100 * summary.summary[a]).toFixed(1) + "%"; bar.appendChild(sp); });
+    el.appendChild(bar);
+    const stats = document.createElement("div"); stats.className = "stats";
+    let html = "<span>P" + actor + ' range: <span class="data">' + summary.inRange.toFixed(1) + "</span> of " + summary.combos + " combos</span><span>frequencies weighted by P" + actor + "'s range</span>";
+    if (st.resolve) html += "<span>" + st.resolve.mode + ' river solve: <span class="data">' + st.resolve.iterations.map((x) => Math.round(x)).join(" / ") + "</span> iterations, <span class=\"data\">"
+      + (st.resolve.seconds[0] + st.resolve.seconds[1]).toFixed(0) + " s</span></span>";
+    stats.innerHTML = html;
+    el.appendChild(stats);
+  }
+
+  function renderInspector(cell, cols, showMix, player, atNode, A) {
+    const el = $("inspector"), weights = st.reach[player];
+    const share = cell.possible ? cell.weight / cell.possible : 0;
+    let html = '<div class="insp-head"><h3>' + cell.label + '</h3><span class="data" style="color:var(--muted)">' + cell.possible + " of " + cell.hands.length
+      + " combos live · " + (100 * share).toFixed(1) + "% in P" + player + "'s range</span></div>";
+    html += '<div class="combos"><table><thead><tr><th>Combo</th><th class="num">Weight</th>'
+      + (atNode ? "<th>Mix</th>" + st.actions.map((l) => '<th class="num">' + l + "</th>").join("") : "") + "</tr></thead><tbody>";
+    for (const h of cell.hands) {
+      if (!st.possible[h]) { html += '<tr class="off"><td class="combo-name">' + comboHtml(h) + '</td><td colspan="' + (1 + (atNode ? A + 1 : 0)) + '">blocked by the board</td></tr>'; continue; }
+      html += '<tr><td class="combo-name">' + comboHtml(h) + '</td><td class="num data">' + weights[h].toFixed(3) + "</td>";
+      if (atNode) {
+        let mini = '<div class="mini">';
+        for (let a = 0; a < A; a++) mini += '<span style="width:' + (100 * st.strategy[h][a]) + "%;background:" + cols[a] + '"></span>';
+        html += "<td>" + mini + "</div></td>";
+        for (let a = 0; a < A; a++) html += '<td class="num data">' + (100 * st.strategy[h][a]).toFixed(1) + "%</td>";
+      }
+      html += "</tr>";
+    }
+    html += "</tbody></table></div>";
+    if (atNode && !showMix) html += '<p class="stats">The mix columns are P' + st.player + "'s strategy at this node for these cards; the weight is P" + player + "'s range.</p>";
+    el.innerHTML = html;
+  }
+
+  (async function start() {
+    try {
+      meta = await (await fetch("/api/meta")).json();
+      build(); renderChips(); renderMode();
+      load();
+    } catch (e) { setStatus("Couldn't reach the viewer server: " + (e.message || e), true); }
+  })();
+})();
+</script>
+</body>
+</html>
