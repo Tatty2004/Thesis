@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from bombpot.core.public import LineClass, PublicTree, Template
-from bombpot.core.solvers.range_cfr import RangeCFR, _segment_sum, backward, class_reach
+from bombpot.core.solvers.range_cfr import RangeCFR, _segment_sum, class_reach
 
 
 def line_template(tp: Template, lines) -> Template:
@@ -57,10 +57,13 @@ class SubgameCFR(RangeCFR):
     root      (reach0, reach1), each (G, L, H): the root ranges of each subgame
     group     (D,) the subgame root of each deal (default: all deals in group 0)
     stack     (L,) chips behind (bookkeeping only: the template carries the betting)
+    leaf      a value provider for the lines that close the street (range_cfr.backward): the
+              street is then not the last (e.g. the turn below a flop-end state, the network
+              valuing the turn's end), and its closes take the provider's values, not showdowns
     """
 
     def __init__(self, street, template, contrib, root, group=None, variant: str = "cfr+", alpha: float = 1.5,
-                 beta: float = 0.0, gamma: float = 2.0, stack=None):
+                 beta: float = 0.0, gamma: float = 2.0, stack=None, leaf=None):
         contrib = np.atleast_1d(np.asarray(contrib, dtype=float))
         r0, r1 = (np.asarray(r, dtype=float) for r in root)
         if r0.ndim == 1:
@@ -75,7 +78,7 @@ class SubgameCFR(RangeCFR):
         none = np.full(L, -1, dtype=np.int64)
         lc = LineClass(template, np.arange(L), contrib, np.array(stack), none, none, none)
         pt = PublicTree("subgame", list(range(H)), [street], [[lc]])
-        super().__init__(pt, variant, alpha, beta, gamma)
+        super().__init__(pt, variant, alpha, beta, gamma, leaf=leaf)
         self.template = template
         self.root_ranges = (r0, r1)
         self.root = tuple(np.ascontiguousarray(r[self.group]) for r in (r0, r1))  # (D, L, H)
@@ -114,8 +117,8 @@ class SubgameCFR(RangeCFR):
         docstring) and exploitability_raw (G, L) in solver units; mass (G, L)."""
         hsig = self.hand_sigma(self.average_strategy() if sigma is None else sigma)
         reach = self.reach(hsig)
-        values = [self.per_group(backward(self.pt, hsig, reach, p, "cfr")[0][0][0][0]) for p in (0, 1)]
-        br = [self.per_group(backward(self.pt, hsig, reach, p, "br")[0][0][0][0]) for p in (0, 1)]
+        values = [self.per_group(self.values(p, hsig, reach, "cfr")[0][0][0][0]) for p in (0, 1)]
+        br = [self.per_group(self.values(p, hsig, reach, "br")[0][0][0][0]) for p in (0, 1)]
         r0, r1 = self.root_ranges  # counterfactual values leave out the player's own reach
         raw = ((br[0] * r0).sum(-1) + (br[1] * r1).sum(-1)) / 2
         mass = self.mass()
