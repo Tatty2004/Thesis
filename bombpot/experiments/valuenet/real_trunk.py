@@ -10,7 +10,10 @@ G.2), and the network's error where that solve uses it.
    Written to <out>/trunk.json; the average strategy to <out>/strategy.npz (float32, one array
    per street, class and node: t{t}_c{c}_k{k}) unless --no-strategy, with real_grade's inputs:
    roots.npy (both reaches at every river root) and leafcfv.npy (both players' leaf values averaged
-   over the iterations), each (2, turn deals, river lines, hands).
+   over the iterations), each (2, turn deals, river lines, hands) (not with --no-river-inputs).
+   With --turn-cfv also turncfv.npy: both players' values at every turn root averaged over the
+   iterations, (2, turn deals, turn lines, hands), the T values of a safe turn re-solve
+   (turn_resolve.py).
 2. On-policy leaf check: `--samples` turn-end states (turn deal, turn line, close) drawn
    uniformly from the final average strategy's, each with both players' ranges there (masked to
    the possible hands, normalized to sum 1; uniform where a player has no mass, as NetLeaf feeds
@@ -81,6 +84,10 @@ def main(argv=None):
     ap.add_argument("--solver", default="gpu", choices=["gpu", "fused"])
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-strategy", action="store_true")
+    ap.add_argument("--turn-cfv", action="store_true",
+                    help="also write turncfv.npy: both players' turn-root values averaged over the iterations "
+                         "(2, turn deals, turn lines, hands), the T values of a safe turn re-solve (turn_resolve.py)")
+    ap.add_argument("--no-river-inputs", action="store_true", help="don't write roots.npy and leafcfv.npy")
     ap.add_argument("--amp", action="store_true", help="mixed precision for the network leaf")
     ap.add_argument("--fuse", action=argparse.BooleanOptionalAction, default=True, help="(default on; --no-fuse) on-policy solves: compiled GPU updates (same numbers to rounding)")
     ap.add_argument("--defer", action="store_true",
@@ -124,7 +131,7 @@ def main(argv=None):
                    devices=[f"cuda:{i}" for i in range(torch.cuda.device_count())] if a.device == "cuda" else None,
                    amp=a.amp)
     print(f"leaf on {len(leaf.replicas)} device(s), amp {a.amp}, batch {leaf.batch_size}", flush=True)
-    solver = LeafCFR(upper, leaf, a.trunk)
+    solver = LeafCFR(upper, leaf, a.trunk, turn_cfv=a.turn_cfv)
     result = {"args": vars(a), "features": model.features.to_dict(), "turn_deals": D, "hands": H, "checks": {}}
     t0 = time.perf_counter()
     while solver.t < a.iters:
@@ -141,7 +148,9 @@ def main(argv=None):
         rg.save_strategy(out / "strategy.npz", avg)
     _, closing = forward(upper, solver.hand_sigma(avg), closing=True)
     closing = [tuple(np.array(x) for x in cl) for cl in closing]  # [turn class] (r0, r1) each (D, L, C, H)
-    if not a.no_strategy:  # real_grade's inputs: both reaches and both averaged leaf values at every river root
+    if a.turn_cfv:  # turn_resolve's T values, over turn_resolve.turn_lines (class then line)
+        np.save(out / "turncfv.npy", np.stack([np.concatenate(solver.turn_cfv_average(q), axis=1) for q in (0, 1)]))
+    if not a.no_strategy and not a.no_river_inputs:  # real_grade's inputs: both reaches and both averaged leaf values at every river root
         np.save(out / "roots.npy", rg.roots_of(upper, closing))
         np.save(out / "leafcfv.npy", np.stack([rg.per_line(upper, [solver.cfv_average(c, q)
                                                                    for c in range(len(upper.classes[2]))])
