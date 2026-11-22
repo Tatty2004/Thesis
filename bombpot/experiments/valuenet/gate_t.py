@@ -187,7 +187,7 @@ def main(argv=None):
     save()
     marks = sorted(int(x) for x in a.resolve_iters.split(","))
     result["resolve"] = {}
-    for source in a.sources.split(","):
+    for source in [x for x in a.sources.split(",") if x]:  # none: the trunk only (--trunk-file)
         gadgets = {}
         for p in (0, 1):
             o = 1 - p

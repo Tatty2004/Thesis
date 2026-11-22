@@ -163,6 +163,36 @@ def deal_leaf(model, equity_d, pot, kappa_d: float, board_d, valid_d, hands, dev
                    possible_by_deal=np.asarray(valid_d, bool)[None], hands=hands, amp=amp)
 
 
+HOST64 = ("mps",)  # device types without float64 (as gpu_subgame.HOST64)
+
+
+def OnDevice(model, device):
+    """`model` run on `device` from a NetLeaf on the host: NetLeaf keeps its float64 work (ranges,
+    masks, rescaling) on the CPU and calls this, which moves the inputs to the device (floats as
+    float32) and the outputs back. For Apple's GPU (mps), which has no float64. NetLeaf's
+    .to() is a no-op on it, so the network stays on the device."""
+    import torch
+
+    class _OnDevice(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner, self.dev = model.to(device), torch.device(device)
+            self.features = model.features
+            for k in ("per_hand", "chunk", "info"):
+                if hasattr(model, k):
+                    setattr(self, k, getattr(model, k))
+
+        def to(self, *a, **kw):
+            return self
+
+        def forward(self, *args, **kw):
+            mv = lambda x: x.to(self.dev, torch.float32 if x.is_floating_point() else x.dtype)
+            out = self.inner(*[mv(x) for x in args], **{k: mv(v) for k, v in kw.items()})
+            return tuple(o.cpu() for o in out)
+
+    return _OnDevice()
+
+
 # Values under the blueprint ------------------------------------------------------------------
 
 
@@ -215,7 +245,8 @@ class Spot:
     """A trunk directory loaded for turn re-solves: the game, the network leaf's pieces, the
     flop strategy and the T values' source."""
 
-    def __init__(self, trunk, device="cuda", model_path=None, amp=None):
+    def __init__(self, trunk, device="cuda", model_path=None, amp=None, built=None):
+        """built: (game, upper, river) of this trunk when already built (real_grade.build)."""
         import torch
 
         from bombpot.holdem.public import HoldemRiver, holdem_public_tree
@@ -227,9 +258,12 @@ class Spot:
         args = self.info["args"]
         self.nr, self.ns = (int(x) for x in args["deck"].split(","))
         flops = tuple(tuple(sorted(cards_of(f, self.ns))) for f in args["flops"].split(","))
-        self.game = dg.make_game(flops, self.nr, self.ns, "pot")
-        self.upper = holdem_public_tree(self.game, upto=2)
-        self.river = HoldemRiver(self.game, self.upper)
+        if built is None:
+            self.game = dg.make_game(flops, self.nr, self.ns, "pot")
+            self.upper = holdem_public_tree(self.game, upto=2)
+            self.river = HoldemRiver(self.game, self.upper)
+        else:
+            self.game, self.upper, self.river = built
         self.turn = self.upper.streets[1]
         self.D, self.H = self.turn.valid.shape
         from bombpot.experiments.valuenet.gate_f import turn_pots
@@ -237,7 +271,12 @@ class Spot:
         self.pots = turn_pots(self.upper)
         self.amp = bool(args.get("amp", False)) if amp is None else amp
         self.device = device
-        self.model = load_model(model_path or args["model"], device)
+        self.model_path = str(model_path or args["model"])
+        self.model = load_model(self.model_path, device)
+        if torch.device(device).type in HOST64:  # no float64 on the device: NetLeaf works on the host
+            self.model, self.leaf_device = OnDevice(self.model, device), "cpu"
+        else:
+            self.leaf_device = device
         name = f"equity_{args['flops'].replace(',', '_')}_{self.nr}x{self.ns}.npy"
         eq = next((x for x in (self.trunk / name, self.trunk.parent / name) if x.exists()), None)
         self.equity = np.load(eq, mmap_mode="r") if eq is not None else None
@@ -265,7 +304,7 @@ class Spot:
     def leaf(self, d: int, c: int, lines):
         """NetLeaf for turn deal d and lines of turn class c: one row per close and line."""
         return deal_leaf(self.model, self.deal_equity(d), self.pots[c][np.atleast_1d(lines)], self.turn.kappa[d],
-                         self.boards[d], self.turn.valid[d], self.hands, self.device, self.amp)
+                         self.boards[d], self.turn.valid[d], self.hands, self.leaf_device, self.amp)
 
     def setup(self, d: int, c: int, l: int, cfv_source: str = "auto") -> dict:
         """The pieces of the re-solve at (deal d, turn class c, line l): street, class, roots,
