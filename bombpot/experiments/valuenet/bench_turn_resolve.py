@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from bombpot.core.solvers.leaf_resolve import LeafGadget
 from bombpot.experiments.valuenet.turn_resolve import Spot, report
 
 
@@ -83,17 +84,22 @@ def main(argv=None):
     ap.add_argument("--iters", default="100,300")
     ap.add_argument("--history", type=int, default=300)
     ap.add_argument("--check-every", type=int, default=25)
-    ap.add_argument("--cfv", default="auto", choices=["auto", "avg", "br"])
+    ap.add_argument("--cfv", default="auto", choices=["auto", "avg", "backup", "onpolicy", "br"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--modes", default="alt,sim", help="alt (alternating updates), sim (simultaneous)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--profile", type=int, default=0, help="also time N network calls at the first spot")
     ap.add_argument("--compile", default="", help="torch.compile modes to time in --profile, e.g. reduce-overhead")
+    ap.add_argument("--amp", choices=["trunk", "on", "off"], default="trunk",
+                    help="the network's mixed precision: as the trunk ran it, or forced on / off")
+    ap.add_argument("--current", action="store_true",
+                    help="--history runs also record the current iterate's gadget exploitability at each check")
+    ap.add_argument("--model", help="override trunk.json's network")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     import torch
 
-    spot = Spot(a.trunk, a.device)
+    spot = Spot(a.trunk, a.device, a.model, amp=None if a.amp == "trunk" else a.amp == "on")
     lens = [int(x) for x in a.iters.split(",")]
     rng = np.random.default_rng(a.seed)
     L = spot.upper.classes[1][0].num_lines
@@ -133,10 +139,21 @@ def main(argv=None):
                 if a.history:
                     g, ev = spot.resolve(s, p, a.history, tol=0.0, check_every=a.check_every, simultaneous=sim)
                     r = report(spot, s, g, ev, p)
-                    r["mode"] = mode
+                    r.update(mode=mode, deal=d, line=l)
+                    if a.current:
+                        g2 = LeafGadget(s["street"], [s["cls"]], [s["reach"][p]], [s["cfv"][1 - p]], p, s["leaf"],
+                                        simultaneous=sim)
+                        cur = []
+                        while g2.t < a.history:
+                            g2.iterate(a.check_every)
+                            cur.append((g2.t, g2.evaluate(current=True)["exploitability"]))
+                        r["history_current"] = cur
                     res["histories"].append(r)
                     print(f"   history p{p} {mode}: " + ", ".join(f"{t}:{x / s['pot']:.2e}" for t, x in r["history"]),
                           flush=True)
+                    if a.current:
+                        print(f"   current p{p} {mode}: " + ", ".join(f"{t}:{x / s['pot']:.2e}"
+                                                                     for t, x in r["history_current"]), flush=True)
         res["gpu_max_allocated_GB"] = torch.cuda.max_memory_allocated() / 2 ** 30 if a.device == "cuda" else None
         res["host_max_rss_GB"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2 ** 20
         out.write_text(json.dumps(res, indent=1, default=float))

@@ -261,15 +261,16 @@ class LeafGadget:
             out.append((m if self.safe else m * self.ro[c]).sum(-1))
         return out
 
-    def evaluate(self) -> dict:
+    def evaluate(self, current: bool = False) -> dict:
         """The average profile's values and the gadget NashConv per root (module doc):
         br[q], values[q]  [c] (D, L_c, H) best-response and on-policy root values
         gap, mass          [c] (D, L_c); exploitability = max gap / mass (chips)
         leaf               [q][c] the leaf's values at the average's closing reach
+        current: the same for the current iterate instead of the average (a diagnostic).
         """
         start = time.perf_counter()
-        avg = self.average_strategy()
-        roots = self._roots(self._follow(avg=True))
+        avg = self.sigma if current else self.average_strategy()
+        roots = self._roots(self._follow(avg=not current))
         br, on, leaf = [None, None], [None, None], [None, None]
         reach = self._reach(avg, roots)
         aggs = self._leaf_both(reach[1])  # the closing reach is the same for both players
@@ -280,7 +281,7 @@ class LeafGadget:
             Vc, _, _, _ = self._pass(avg, roots, q, "cfr", agg, reach)
             on[q] = [v[0] for v in Vc]
         p, o = self.p, self.o
-        gap, ga = [], self.gadget_average() if self.safe else None
+        gap, ga = [], (self.g_sig if current else self.gadget_average()) if self.safe else None
         for c in range(len(self.classes)):
             best_p = (self.rp[c] * br[p][c]).sum(-1)
             if self.safe:
@@ -295,24 +296,58 @@ class LeafGadget:
         return {"br": br, "values": on, "gap": gap, "mass": mass, "exploitability": norm, "leaf": leaf,
                 "gadget": ga, "iterations": self.t}
 
-    def solve(self, iters: int, tol: float | None = None, check_every: int = 10) -> dict:
+    def solve(self, iters: int, tol: float | None = None, check_every: int = 10, keep_best: bool = False,
+              progress=None) -> dict:
         """Iterate to `iters` iterations, or until the largest gap / mass is <= tol (checked
         every `check_every` iterations). Returns evaluate()'s dict with `history`
-        [(iteration, exploitability)] of the checks."""
-        ev, history = None, []
+        [(iteration, exploitability)] of the checks.
+
+        keep_best: also check every `check_every` iterations and end on the check with the
+        smallest exploitability: its average strategy, gadget average and averaged leaf values
+        are restored (iterations after it are discarded; `best_iteration` says which). With a
+        network leaf the gadget is not a fixed game (the leaf's values move with the ranges),
+        so the average's gap need not fall monotonically; the reported strategy is then the
+        best one seen, and its gap is the one reported. progress(t, exploitability) is called
+        after every check."""
+        ev, history, best = None, [], None
+        checking = tol is not None or keep_best
         while self.t < iters:
-            n = iters - self.t if tol is None else min(check_every - self.t % check_every, iters - self.t)
+            n = iters - self.t if not checking else min(check_every - self.t % check_every, iters - self.t)
             self.iterate(n)
-            if tol is not None or self.t >= iters:
+            if checking or self.t >= iters:
                 ev = self.evaluate()
                 history.append((self.t, ev["exploitability"]))
+                if progress is not None:
+                    progress(self.t, ev["exploitability"])
+                if keep_best and (best is None or ev["exploitability"] <= best[0]):
+                    best = (ev["exploitability"], self._snapshot(), ev)
                 if tol is not None and ev["exploitability"] <= tol:
                     break
         if ev is None:
             ev = self.evaluate()
             history.append((self.t, ev["exploitability"]))
+            if keep_best:
+                best = (ev["exploitability"], self._snapshot(), ev)
+        if keep_best:
+            if best[2] is not ev:
+                self._restore(best[1])
+                ev = best[2]
+            ev["best_iteration"] = best[1]["t"]
         ev["history"] = history
         return ev
+
+    def _snapshot(self) -> dict:
+        """What average_strategy, gadget_average and leaf_average read."""
+        copy = lambda xs: None if xs is None else [x.copy() for x in xs]
+        return {"t": self.t, "cum": [copy(row) for row in self.cum],
+                "g_cum": copy(self.g_cum) if self.safe else None,
+                "leaf_cum": [copy(x) for x in self.leaf_cum], "weight_sum": list(self.weight_sum)}
+
+    def _restore(self, snap: dict) -> None:
+        self.cum = snap["cum"]
+        if self.safe:
+            self.g_cum = snap["g_cum"]
+        self.leaf_cum, self.weight_sum = snap["leaf_cum"], snap["weight_sum"]
 
 
 def _matching_avg(c: np.ndarray, empty: float | None = None) -> np.ndarray:

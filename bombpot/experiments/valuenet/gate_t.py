@@ -16,6 +16,9 @@ river lines in 6 classes).
    acting player; the flop is the trunk's. Exact exploitability on the full tree. T values at
    the turn root (`--sources`):
      avg     the trunk's averaged turn-root values (real_trunk --turn-cfv)
+     backup  the trunk's averaged leaf values backed up through its average turn strategy
+             (turn_resolve --cfv backup: what a trunk without --turn-cfv still allows)
+     onpolicy  the values of the trunk's average turn strategy, the leaf at its closing reach
      br      the opponent's best response to the trunk's turn at each root (leaf-valued)
      unsafe  no gadget: the turn alone from both trunk reaches (for contrast)
    Also, per source: the summed gadget gaps (chips per hand of the whole game), the largest
@@ -24,12 +27,18 @@ river lines in 6 classes).
    on-policy root value minus p's trunk value, each summed with the player's trunk reach.
 
     python -m bombpot.experiments.valuenet.gate_t --trunk-iters 100 --resolve-iters 100,300 \
-        --out results/valuenet/turn/gate_t.json
+        --out results/valuenet/turn/gate_t.json [--trunk-file trunk.pkl]
+
+--trunk-file: load the trunk (and its grade) from this pickle when it exists, else run it and
+save it there, so several runs (e.g. one per source) share one trunk. Each source's T values are
+also compared with avg's ("t_values_vs_avg": the opponent-reach-weighted L1 distance and signed
+difference over the reach-weighted L1 size of avg's, per player).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import pickle
 import time
 from pathlib import Path
 
@@ -41,7 +50,7 @@ from bombpot.core.solvers.resolve import resolve_batch
 from bombpot.core.solvers.subgame import ExactRiverLeaf
 from bombpot.experiments.valuenet import datagen as dg
 from bombpot.experiments.valuenet.gate_f import LeafCFR
-from bombpot.experiments.valuenet.turn_resolve import blueprint_values
+from bombpot.experiments.valuenet.turn_resolve import backup_values, blueprint_values
 from bombpot.holdem.public import HoldemRiver, holdem_public_tree
 
 FLOPS = ((0, 3, 7), (9, 11, 6))  # 2c3c4d / 5c6d4c on 5 ranks x 3 suits
@@ -106,6 +115,7 @@ def main(argv=None):
     ap.add_argument("--sub-iters", type=int, default=5000)
     ap.add_argument("--inner", default="dcfr", choices=["cfr+", "dcfr"])
     ap.add_argument("--out", required=True)
+    ap.add_argument("--trunk-file", help="load the trunk from this pickle if it exists, else save it there")
     a = ap.parse_args(argv)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -121,33 +131,67 @@ def main(argv=None):
     def save():
         out.write_text(json.dumps(result, indent=1, default=float))
 
-    trunk = LeafCFR(upper, leaf, "dcfr", turn_cfv=True)
-    while trunk.t < a.trunk_iters:
-        trunk.iteration()
-    avg = trunk.hand_sigma(trunk.average_strategy())
+    tf = Path(a.trunk_file) if a.trunk_file else None
+    if tf is not None and tf.exists():
+        with open(tf, "rb") as f:
+            saved = pickle.load(f)
+        if saved["trunk_iters"] != a.trunk_iters or saved["game"] != a.game:
+            raise SystemExit(f"{tf} holds a {saved['game']} trunk of {saved['trunk_iters']} iterations")
+        print(f"trunk loaded from {tf}", flush=True)
+    else:
+        trunk = LeafCFR(upper, leaf, "dcfr", turn_cfv=True)
+        while trunk.t < a.trunk_iters:
+            trunk.iteration()
+        avg = trunk.hand_sigma(trunk.average_strategy())
+        saved = {"game": a.game, "trunk_iters": a.trunk_iters, "avg": avg, "seconds": trunk.solve_seconds,
+                 "flop_turn": trunk.exploitability(),
+                 "tcfv": [trunk.turn_cfv_average(q) for q in (0, 1)],
+                 "leaf_avg": [[x / trunk.weight_sum[q] for x in trunk.leaf_cum[q]] for q in (0, 1)]}
+    avg, ft = saved["avg"], saved["flop_turn"]
     reach = forward(upper, avg)
     roots = [r[0] for r in reach[1]]  # [c] (reach0, reach1) at the turn roots
-    ft = trunk.exploitability()
-    result["trunk"] = {"iterations": trunk.t, "seconds": trunk.solve_seconds, "flop_turn": ft}
-    print(f"trunk {trunk.t} its {trunk.solve_seconds:.0f}s, flop+turn vs leaf {ft['exploitability']:.5f}", flush=True)
-    river_trunk = [to_river_classes(upper, [x / trunk.weight_sum[1 - p] for x in trunk.leaf_cum[1 - p]])
-                   for p in (0, 1)]
-    t1 = time.perf_counter()
-    base = composite(full, upper, leaf, avg[0], [avg[1], avg[1]], river_trunk, a.resolve_tol, a.sub_iters, a.inner)
+    result["trunk"] = {"iterations": a.trunk_iters, "seconds": saved["seconds"], "flop_turn": ft}
+    print(f"trunk {a.trunk_iters} its {saved['seconds']:.0f}s, flop+turn vs leaf {ft['exploitability']:.5f}", flush=True)
+    river_trunk = [to_river_classes(upper, saved["leaf_avg"][1 - p]) for p in (0, 1)]
+    if "grade" not in saved:
+        t1 = time.perf_counter()
+        saved["grade"] = composite(full, upper, leaf, avg[0], [avg[1], avg[1]], river_trunk, a.resolve_tol,
+                                   a.sub_iters, a.inner)
+        saved["grade_seconds"] = time.perf_counter() - t1
+        if tf is not None:
+            tf.parent.mkdir(parents=True, exist_ok=True)
+            with open(tf.with_suffix(".tmp"), "wb") as f:
+                pickle.dump(saved, f)
+            tf.with_suffix(".tmp").replace(tf)
+    base = saved["grade"]
     result["trunk"]["grade"] = base
-    result["trunk"]["grade_seconds"] = time.perf_counter() - t1
+    result["trunk"]["grade_seconds"] = saved["grade_seconds"]
     print(f"trunk grade (river re-solved) {base['exploitability']:.5f}", flush=True)
     save()
 
     bp = blueprint_values(upper.streets[1], upper.classes[1], avg[1], roots, leaf)
-    tcfv = [trunk.turn_cfv_average(q) for q in (0, 1)]
+    tcfv = saved["tcfv"]
+    bk = backup_values(upper.streets[1], upper.classes[1], avg[1], roots, saved["leaf_avg"])
+    tsrc = {"avg": tcfv, "backup": bk, "onpolicy": bp["values"], "br": bp["br"]}
+    result["t_values_vs_avg"] = {}
+    for name, x in tsrc.items():
+        row = {}
+        for q in (0, 1):
+            w = [r[q] for r in roots]
+            size = sum(float((wc * np.abs(t)).sum()) for wc, t in zip(w, tcfv[q]))
+            row[q] = {"l1": sum(float((wc * np.abs(y - t)).sum()) for wc, y, t in zip(w, x[q], tcfv[q])) / size,
+                      "signed": sum(float((wc * (y - t)).sum()) for wc, y, t in zip(w, x[q], tcfv[q])) / size}
+        result["t_values_vs_avg"][name] = row
+        print(f"T values {name:8s} vs avg: L1 {row[0]['l1']:.4f} / {row[1]['l1']:.4f}, signed "
+              f"{row[0]['signed']:+.4f} / {row[1]['signed']:+.4f} (p0 / p1, reach-weighted, over |avg|)", flush=True)
+    save()
     marks = sorted(int(x) for x in a.resolve_iters.split(","))
     result["resolve"] = {}
     for source in a.sources.split(","):
         gadgets = {}
         for p in (0, 1):
             o = 1 - p
-            cfv = None if source == "unsafe" else (tcfv[o] if source == "avg" else bp["br"][o])
+            cfv = None if source == "unsafe" else tsrc[source][o]
             gadgets[p] = LeafGadget(upper.streets[1], upper.classes[1], [r[p] for r in roots], cfv, p, leaf,
                                     reach_o=[r[o] for r in roots] if source == "unsafe" else None)
         for m in marks:
@@ -157,7 +201,7 @@ def main(argv=None):
                 g = gadgets[p]
                 ev = g.solve(m)
                 ro, rp = roots[0][o], roots[0][p]
-                tv = tcfv[o][0] if source != "br" else bp["br"][o][0]
+                tv = tcfv[o][0] if source == "unsafe" else tsrc[source][o][0]
                 row["players"][p] = {
                     "iterations": g.t, "seconds": g.seconds, "leaf_calls": g.leaf_calls, "leaf_seconds": g.leaf_seconds,
                     "gap_sum": float(sum(x.sum() for x in ev["gap"])),

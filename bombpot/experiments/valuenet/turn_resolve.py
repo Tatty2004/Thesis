@@ -5,7 +5,7 @@ value network (NetLeaf) at every turn-end state exactly as the trunk values them
 the re-solved turn strategy.
 
     python -m bombpot.experiments.valuenet.turn_resolve --trunk results/valuenet/real/<name> \
-        --flop-line r0.5c --turn 5h2c [--player 0] [--iters 300] [--cfv auto|avg|br] [--out spot.npz]
+        --flop-line r0.5c --turn 5h2c [--player 0] [--iters 300] [--cfv auto|avg|backup|onpolicy|br] [--out spot.npz]
 
 Inputs from the trunk directory (real_trunk's outputs):
   strategy.npz  the average strategy; the flop's gives both players' reach at the turn root
@@ -18,7 +18,14 @@ Inputs from the trunk directory (real_trunk's outputs):
   trunk.json    the game, the network and --amp
 --cfv br: the opponent's best-response value at the turn root against the trunk's average turn
 strategy, the network valuing the turn's end (one leaf call per player; what the safety bound
-of resolve.py is stated for). auto: avg when turncfv.npy exists, else br.
+of resolve.py is stated for). Without turncfv.npy (trunks run without --turn-cfv), two cheap
+stand-ins for avg from what every trunk stores:
+  backup    the trunk's averaged turn-end values (leafcfv.npy, or viewer_pack's leafcfv32.npy)
+            backed up through its average turn strategy (no network call): avg's numbers except
+            that avg averages each iteration's own turn strategy with its own leaf values
+  onpolicy  the values of the average turn strategy, the network valuing the turn's end at the
+            average's closing reach (one network call)
+auto: avg when turncfv.npy exists, else backup when leafcfv does, else onpolicy.
 
 Units are the trunk's throughout (the turn street's chance weights, unnormalized reaches), so
 the T values and the re-solve's values compare directly; `exploitability` is the gadget's
@@ -177,6 +184,30 @@ def blueprint_values(street, classes, sigma, roots, leaf) -> dict:
     return out
 
 
+def backup_values(street, classes, sigma, roots, agg) -> list:
+    """[q][c] (D, L_c, H): both players' on-policy values at the roots of `classes` under the
+    strategy sigma[c][k] from root reaches roots[c], each close taking a stored value instead of
+    a leaf call: agg[q][c] (D, L_c, closes_c, H), solver units (the trunk's averaged leaf values,
+    real_trunk's leafcfv.npy). The T values of --cfv backup: the trunk's averaged turn-end values
+    backed up through its average turn strategy (no network call)."""
+    out = [None, None]
+    nodes = [class_reach(lc.template, s, r)[0] for lc, s, r in zip(classes, sigma, roots)]
+    for q in (0, 1):
+        out[q] = [class_values(lc.template, street, lc.contrib, sigma[c], nodes[c], q, "cfr", False, agg[q][c])[0][0]
+                  for c, lc in enumerate(classes)]
+    return out
+
+
+def close_index(upper) -> dict:
+    """(turn class, turn line, close) -> index among all river lines (real_grade.river_lines)."""
+    out, i = {}, 0
+    for rc in upper.classes[upper.num_streets]:
+        for l in range(rc.num_lines):
+            out[(int(rc.parent_class[l]), int(rc.parent_line[l]), int(rc.parent_close[l]))] = i
+            i += 1
+    return out
+
+
 # One real-deck spot ---------------------------------------------------------------------------
 
 
@@ -207,8 +238,9 @@ class Spot:
         self.amp = bool(args.get("amp", False)) if amp is None else amp
         self.device = device
         self.model = load_model(model_path or args["model"], device)
-        eq = self.trunk.parent / f"equity_{args['flops'].replace(',', '_')}_{self.nr}x{self.ns}.npy"
-        self.equity = np.load(eq, mmap_mode="r") if eq.exists() else None
+        name = f"equity_{args['flops'].replace(',', '_')}_{self.nr}x{self.ns}.npy"
+        eq = next((x for x in (self.trunk / name, self.trunk.parent / name) if x.exists()), None)
+        self.equity = np.load(eq, mmap_mode="r") if eq is not None else None
         self.boards = np.concatenate([np.broadcast_to(np.array(self.game.flops), (self.D, 2, 3)),
                                       np.asarray(self.river.turn_cards)[:, :, None]], axis=-1)
         self.hands = np.array(self.upper.hands, dtype=np.int64)
@@ -216,6 +248,9 @@ class Spot:
         self.roots = turn_root_reach(self.upper, self.flop_sigma)
         cfv = self.trunk / "turncfv.npy"
         self.turncfv = np.load(cfv, mmap_mode="r") if cfv.exists() else None
+        leaf = next((x for x in (self.trunk / "leafcfv32.npy", self.trunk / "leafcfv.npy") if x.exists()), None)
+        self.leafcfv = np.load(leaf, mmap_mode="r") if leaf is not None else None  # (2, D, river lines, H)
+        self.close_of = close_index(self.upper)
         self.lines = turn_lines(self.upper)
         self.torch = torch
         self.setup_seconds = time.perf_counter() - t0
@@ -239,31 +274,47 @@ class Spot:
         cls = restrict(self.upper.classes[1][c], [l])
         r = self.roots[c][:, l][:, None, None]  # (2, 1, 1, H)
         leaf = self.leaf(d, c, [l])
-        src = cfv_source
-        if src == "auto":
-            src = "avg" if self.turncfv is not None else "br"
+        src = self.cfv_source(cfv_source)
         out = {"street": street, "cls": cls, "reach": r, "leaf": leaf, "cfv_source": src, "deal": d, "class": c,
                "line": l, "pot": 2.0 * float(cls.contrib[0])}
+        if src not in ("avg", "backup", "onpolicy", "br"):
+            raise ValueError(f"unknown T-value source {src!r}")
         if src == "avg":
             if self.turncfv is None:
                 raise SystemExit(f"{self.trunk}/turncfv.npy is missing (run real_trunk with --turn-cfv), use --cfv br")
             i = self.lines.index((c, l))
             out["cfv"] = np.asarray(self.turncfv[:, d, i], dtype=np.float64)[:, None, None]  # (2, 1, 1, H)
+        elif src == "backup":
+            if self.leafcfv is None:
+                raise SystemExit(f"{self.trunk} has no leafcfv.npy (or leafcfv32.npy) for --cfv backup")
+            sig = turn_strategy_slice(self.trunk / "strategy.npz", self.upper, d, c, [l])
+            closes = len(cls.template.closes)
+            idx = [self.close_of[(c, l, j)] for j in range(closes)]
+            agg = [[np.asarray(self.leafcfv[q, d, idx], dtype=np.float64)[None, None]] for q in (0, 1)]
+            bv = backup_values(street, [cls], [sig], [(r[0], r[1])], agg)
+            out["cfv"] = np.stack([bv[q][0] for q in (0, 1)])
         else:
             sig = turn_strategy_slice(self.trunk / "strategy.npz", self.upper, d, c, [l])
             bp = blueprint_values(street, [cls], [sig], [(r[0], r[1])], leaf)
             out["blueprint"] = bp
-            out["cfv"] = np.stack([bp["br"][q][0] for q in (0, 1)])
+            out["cfv"] = np.stack([bp["br" if src == "br" else "values"][q][0] for q in (0, 1)])
         return out
 
+    def cfv_source(self, src: str = "auto") -> str:
+        """auto: avg when turncfv.npy exists, else backup when the averaged leaf values do,
+        else onpolicy (needs only strategy.npz and the network)."""
+        if src != "auto":
+            return src
+        return "avg" if self.turncfv is not None else "backup" if self.leafcfv is not None else "onpolicy"
+
     def resolve(self, s: dict, player: int, iters: int, tol=None, check_every: int = 10,
-                simultaneous: bool = False) -> tuple:
+                simultaneous: bool = False, keep_best: bool = False, progress=None) -> tuple:
         """simultaneous: both players updated from one profile, one network pass per iteration
-        (half the calls of alternating updates; LeafGadget)."""
+        (half the calls of alternating updates; LeafGadget). keep_best, progress: LeafGadget.solve's."""
         o = 1 - player
         g = LeafGadget(s["street"], [s["cls"]], [s["reach"][player]], [s["cfv"][o]], player, s["leaf"],
                        simultaneous=simultaneous)
-        ev = g.solve(iters, tol, check_every)
+        ev = g.solve(iters, tol, check_every, keep_best=keep_best, progress=progress)
         return g, ev
 
 
@@ -314,8 +365,10 @@ def main(argv=None):
     ap.add_argument("--iters", type=int, default=300)
     ap.add_argument("--tol", type=float, help="stop once gap / mass <= tol (chips), checked every --check-every")
     ap.add_argument("--check-every", type=int, default=25)
-    ap.add_argument("--cfv", default="auto", choices=["auto", "avg", "br"])
+    ap.add_argument("--cfv", default="auto", choices=["auto", "avg", "backup", "onpolicy", "br"])
     ap.add_argument("--simultaneous", action="store_true", help="simultaneous updates: one network pass per iteration")
+    ap.add_argument("--keep-best", action="store_true", help="end on the check (every --check-every) with the "
+                                                             "smallest gadget exploitability")
     ap.add_argument("--node", type=int, default=None, help="turn template node to print (default: the root for "
                                                             "player 0, player 1's first node otherwise)")
     ap.add_argument("--top", type=int, default=30, help="hands to print (by reach)")
@@ -329,7 +382,7 @@ def main(argv=None):
     t0 = time.perf_counter()
     s = spot.setup(d, c, l, a.cfv)
     setup = time.perf_counter() - t0
-    g, ev = spot.resolve(s, a.player, a.iters, a.tol, a.check_every, a.simultaneous)
+    g, ev = spot.resolve(s, a.player, a.iters, a.tol, a.check_every, a.simultaneous, a.keep_best)
     rep = report(spot, s, g, ev, a.player)
     rep.update(setup_seconds=spot.setup_seconds, spot_setup_seconds=setup, simultaneous=a.simultaneous)
     tp = s["cls"].template
