@@ -99,32 +99,40 @@ class NetLeaf:
 
     def values(self, p: int, t: int, closing):
         if isinstance(closing, list):
-            return [self._values(p, c, np.asarray(pot, float), np.asarray(st, float))
+            return [self._values((p,), c, np.asarray(pot, float), np.asarray(st, float))[0]
                     for c, pot, st in zip(closing, self.pot, self.stack)]
-        return self._values(p, closing, np.asarray(self.pot, float), np.asarray(self.stack, float))
+        return self._values((p,), closing, np.asarray(self.pot, float), np.asarray(self.stack, float))[0]
 
-    def _values(self, p: int, closing, pot: np.ndarray, stack: np.ndarray) -> np.ndarray:
+    def values_both(self, t: int, closing):
+        """(values(0, t, closing), values(1, t, closing)) from one network pass per row."""
+        if isinstance(closing, list):
+            per = [self._values((0, 1), c, np.asarray(pot, float), np.asarray(st, float))
+                   for c, pot, st in zip(closing, self.pot, self.stack)]
+            return [x[0] for x in per], [x[1] for x in per]
+        return tuple(self._values((0, 1), closing, np.asarray(self.pot, float), np.asarray(self.stack, float)))
+
+    def _values(self, ps, closing, pot: np.ndarray, stack: np.ndarray) -> list:
         r0, r1 = (np.asarray(r, dtype=np.float64) for r in closing)
         D, L, C, H = r0.shape
         assert (D, H) == (self.D, self.H) and pot.shape == stack.shape == (L, C), "shapes disagree"
         rows = D * L * C
         flat = [np.ascontiguousarray(r.reshape(rows, H)) for r in (r0, r1)]
         scal = pot_features(pot, stack).reshape(L * C, -1)
-        out = np.empty((rows, H))
+        outs = [np.empty((rows, H)) for _ in ps]
         K = len(self.replicas)
         cuts = [rows * k // K for k in range(K + 1)]
         if K == 1:
-            self._rows(self.replicas[0], p, flat, scal, pot.reshape(-1), out, 0, rows, L * C)
+            self._rows(self.replicas[0], ps, flat, scal, pot.reshape(-1), outs, 0, rows, L * C)
         else:
             with ThreadPoolExecutor(K) as pool:
-                jobs = [pool.submit(self._rows, rep, p, flat, scal, pot.reshape(-1), out, cuts[k], cuts[k + 1], L * C)
+                jobs = [pool.submit(self._rows, rep, ps, flat, scal, pot.reshape(-1), outs, cuts[k], cuts[k + 1], L * C)
                         for k, rep in enumerate(self.replicas)]
                 for j in jobs:
                     j.result()
-        return out.reshape(D, L, C, H)
+        return [out.reshape(D, L, C, H) for out in outs]
 
-    def _rows(self, rep, p: int, flat, scal_np, pot_np, out, lo: int, hi: int, LC: int) -> None:
-        """Rows [lo, hi) of `out` on one replica."""
+    def _rows(self, rep, ps, flat, scal_np, pot_np, outs, lo: int, hi: int, LC: int) -> None:
+        """Rows [lo, hi) of `outs[i]` (player ps[i]'s values) on one replica."""
         dev, model, B = rep["device"], rep["model"], self.cfg.num_bins
         H = self.H
         with torch.no_grad():
@@ -133,7 +141,7 @@ class NetLeaf:
             for A in range(lo, hi, self.block):
                 Z = min(A + self.block, hi)
                 blk = [torch.from_numpy(r[A:Z]).to(dev) for r in flat]
-                res = torch.empty(Z - A, H, dtype=torch.float64, device=dev)
+                res = [torch.empty(Z - A, H, dtype=torch.float64, device=dev) for _ in ps]
                 for a in range(A, Z, self.batch_size):
                     n = torch.arange(a, min(a + self.batch_size, Z), device=dev)
                     d, lc = n // LC, n % LC
@@ -151,8 +159,10 @@ class NetLeaf:
                     board = rep["board"][d] if self.cfg.board == "ids" else rep["board"][d].to(self.dtype)
                     hand = {} if rep["hx"] is None else {"hx": rep["hx"][d], "hc": rep["hc"].expand(len(n), H, 2)}
                     with torch.autocast("cuda", enabled=self.amp and dev.type == "cuda"):
-                        v = model(board, scal[lc].to(self.dtype), hists[0], hists[1], **hand)[p]
-                    cfv = torch.gather(v.double(), 1, bins)
-                    scale = potv[lc] * mass[1 - p] * rep["kappa"][d]
-                    res[a - A:a - A + len(n)] = torch.where(poss, cfv * scale[:, None], 0.0)
-                out[A:Z] = res.cpu().numpy()
+                        both = model(board, scal[lc].to(self.dtype), hists[0], hists[1], **hand)
+                    for i, p in enumerate(ps):
+                        cfv = torch.gather(both[p].double(), 1, bins)
+                        scale = potv[lc] * mass[1 - p] * rep["kappa"][d]
+                        res[i][a - A:a - A + len(n)] = torch.where(poss, cfv * scale[:, None], 0.0)
+                for out, r in zip(outs, res):
+                    out[A:Z] = r.cpu().numpy()

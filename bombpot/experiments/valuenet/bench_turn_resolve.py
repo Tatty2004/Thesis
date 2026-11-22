@@ -32,6 +32,7 @@ def main(argv=None):
     ap.add_argument("--check-every", type=int, default=25)
     ap.add_argument("--cfv", default="auto", choices=["auto", "avg", "br"])
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--modes", default="alt,sim", help="alt (alternating updates), sim (simultaneous)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
@@ -58,32 +59,39 @@ def main(argv=None):
         for p in (0, 1):
             if float(s["reach"][p].sum()) <= 0:
                 continue
-            for n in lens:
-                if a.device == "cuda":
-                    torch.cuda.synchronize()
-                g, ev = spot.resolve(s, p, n)
-                r = report(spot, s, g, ev, p)
-                r.update(spot_setup_seconds=setup, tree_seconds=g.seconds - g.leaf_seconds)
-                res["runs"].append(r)
-                print(f"deal {d} line {r['flop_line']:9s} p{p} {n:4d} its: {g.seconds:6.2f}s (net {g.leaf_seconds:5.2f}s, "
-                      f"{g.leaf_calls} calls), expl {r['exploitability_pots']:.2e} pots, setup {setup:.2f}s", flush=True)
-            if a.history:
-                g, ev = spot.resolve(s, p, a.history, tol=0.0, check_every=a.check_every)
-                r = report(spot, s, g, ev, p)
-                res["histories"].append(r)
-                print(f"   history p{p}: " + ", ".join(f"{t}:{x / s['pot']:.2e}" for t, x in r["history"]), flush=True)
+            for mode in a.modes.split(","):
+                sim = mode == "sim"
+                for n in lens:
+                    if a.device == "cuda":
+                        torch.cuda.synchronize()
+                    g, ev = spot.resolve(s, p, n, simultaneous=sim)
+                    r = report(spot, s, g, ev, p)
+                    r.update(spot_setup_seconds=setup, tree_seconds=g.seconds - g.leaf_seconds, mode=mode)
+                    res["runs"].append(r)
+                    print(f"deal {d} line {r['flop_line']:9s} p{p} {mode} {n:4d} its: {g.seconds:6.2f}s (net "
+                          f"{g.leaf_seconds:5.2f}s, {g.leaf_calls} calls), expl {r['exploitability_pots']:.2e} pots, "
+                          f"setup {setup:.2f}s", flush=True)
+                if a.history:
+                    g, ev = spot.resolve(s, p, a.history, tol=0.0, check_every=a.check_every, simultaneous=sim)
+                    r = report(spot, s, g, ev, p)
+                    r["mode"] = mode
+                    res["histories"].append(r)
+                    print(f"   history p{p} {mode}: " + ", ".join(f"{t}:{x / s['pot']:.2e}" for t, x in r["history"]),
+                          flush=True)
         res["gpu_max_allocated_GB"] = torch.cuda.max_memory_allocated() / 2 ** 30 if a.device == "cuda" else None
         res["host_max_rss_GB"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2 ** 20
         out.write_text(json.dumps(res, indent=1, default=float))
-    for n in lens:
-        t = [r["seconds"] for r in res["runs"] if r["iterations"] == n]
-        e = [r["exploitability_pots"] for r in res["runs"] if r["iterations"] == n]
-        res.setdefault("summary", {})[n] = {"seconds_mean": float(np.mean(t)), "seconds_max": float(np.max(t)),
-                                            "net_share": float(np.mean([r["leaf_seconds"] / r["seconds"] for r in res["runs"]
-                                                                        if r["iterations"] == n])),
-                                            "exploitability_pots_median": float(np.median(e)),
-                                            "exploitability_pots_max": float(np.max(e))}
-        print(f"{n} its: {np.mean(t):.2f}s mean, {np.max(t):.2f}s max; gadget expl median {np.median(e):.2e} pots", flush=True)
+    for mode in a.modes.split(","):
+        for n in lens:
+            rs = [r for r in res["runs"] if r["iterations"] == n and r["mode"] == mode]
+            t = [r["seconds"] for r in rs]
+            e = [r["exploitability_pots"] for r in rs]
+            res.setdefault("summary", {})[f"{mode}_{n}"] = {
+                "seconds_mean": float(np.mean(t)), "seconds_max": float(np.max(t)),
+                "net_share": float(np.mean([r["leaf_seconds"] / r["seconds"] for r in rs])),
+                "exploitability_pots_median": float(np.median(e)), "exploitability_pots_max": float(np.max(e))}
+            print(f"{mode} {n} its: {np.mean(t):.2f}s mean, {np.max(t):.2f}s max; gadget expl median "
+                  f"{np.median(e):.2e} pots, max {np.max(e):.2e}", flush=True)
     out.write_text(json.dumps(res, indent=1, default=float))
     print(f"GPU {res['gpu_max_allocated_GB']} GB, host RSS {res['host_max_rss_GB']:.1f} GB", flush=True)
 

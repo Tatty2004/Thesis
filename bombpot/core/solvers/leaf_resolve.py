@@ -19,7 +19,9 @@ Everything is per (deal, line): many roots are solved at once, vectorized over t
 with its batch (a leaf solving exact subgames to a summed tolerance couples their accuracy).
 
 Iterations are alternating (player 0 first), with range_cfr's update kernel and weights, so
-CFR, CFR+ or DCFR as RangeCFR runs them. Averaging weights: o's strategy by its reach within
+CFR, CFR+ or DCFR as RangeCFR runs them; `simultaneous=True` updates both players from one
+profile instead (one leaf pass per iteration, both players' values from it: half the network
+calls with NetLeaf.values_both). Averaging weights: o's strategy by its reach within
 the street times its current F probability (resolve._solve's own reach), p's by its reach
 within the street (the same average as weighting by p's root reach too wherever that is
 positive, and defined for hands p doesn't hold). The leaf's values for each player are kept
@@ -69,7 +71,8 @@ class LeafGadget:
     """
 
     def __init__(self, street, classes, reach_p, cfv, player: int, leaf=None, reach_o=None, variant: str = "dcfr",
-                 alpha: float = 1.5, beta: float = 0.0, gamma: float = 2.0, leaf_street: int = 1):
+                 alpha: float = 1.5, beta: float = 0.0, gamma: float = 2.0, leaf_street: int = 1,
+                 simultaneous: bool = False):
         if variant not in VARIANTS:
             raise ValueError(f"unknown variant {variant!r}")
         if any(lc.template.num_nodes == 0 for lc in classes):
@@ -79,6 +82,7 @@ class LeafGadget:
             raise ValueError("an unsafe re-solve needs the opponent's root reach")
         self.street, self.classes, self.leaf, self.leaf_street = street, list(classes), leaf, leaf_street
         self.p, self.o = player, 1 - player
+        self.simultaneous = simultaneous
         self.variant, self.alpha, self.beta, self.gamma = variant, alpha, beta, gamma
         f = lambda xs: [np.ascontiguousarray(x, dtype=np.float64) for x in xs]
         self.rp = f(reach_p)
@@ -126,15 +130,33 @@ class LeafGadget:
         self.leaf_calls += 1
         return [np.asarray(a, dtype=np.float64) for a in agg]
 
-    def _pass(self, sigma, roots, q: int, mode: str):
-        """Player q's values (V[c][k], R[c][k]) at every node, the nodes' reach, and q's leaf
-        values (or None)."""
+    def _leaf_both(self, closing) -> tuple:
+        """Both players' leaf values for one closing reach: one call when the leaf has
+        values_both (NetLeaf: one network pass), else two."""
+        if self.leaf is None:
+            return None, None
+        if not hasattr(self.leaf, "values_both"):
+            return self._leaf_values(0, closing), self._leaf_values(1, closing)
+        start = time.perf_counter()
+        both = self.leaf.values_both(self.leaf_street, stack_closing(closing))
+        self.leaf_seconds += time.perf_counter() - start
+        self.leaf_calls += 1
+        return tuple([np.asarray(a, dtype=np.float64) for a in x] for x in both)
+
+    def _reach(self, sigma, roots):
         nodes, closing = [], []
         for lc, sg, r in zip(self.classes, sigma, roots):
             n, cl = class_reach(lc.template, sg, r)
             nodes.append(n)
             closing.append(cl)
-        agg = self._leaf_values(q, closing)
+        return nodes, closing
+
+    def _pass(self, sigma, roots, q: int, mode: str, agg="call", reach=None):
+        """Player q's values (V[c][k], R[c][k]) at every node, the nodes' reach, and q's leaf
+        values (or None). agg: q's leaf values when already known; reach: (nodes, closing)."""
+        nodes, closing = self._reach(sigma, roots) if reach is None else reach
+        if isinstance(agg, str):
+            agg = self._leaf_values(q, closing)
         V, R = [], []
         for c, lc in enumerate(self.classes):
             v, r = class_values(lc.template, self.street, lc.contrib, sigma[c], nodes[c], q, mode, agg is None,
@@ -159,34 +181,58 @@ class LeafGadget:
         for _ in range(n):
             self.t += 1
             weight, pos, neg = self._weights()
+            if self.simultaneous:  # both players' regrets from one profile (one leaf pass for both)
+                follow = self._follow()
+                roots = self._roots(follow)
+                reach = self._reach(self.sigma, roots)
+                aggs = self._leaf_both(reach[1])
+                res = [self._pass(self.sigma, roots, q, "cfr", aggs[q], reach) for q in (0, 1)]
+                for q in (0, 1):
+                    self._accumulate(q, res[q][3], weight)
+                for c, lc in enumerate(self.classes):
+                    within, _ = class_reach(lc.template, self.sigma[c], ones[c])
+                    for k, owner in enumerate(lc.template.players):
+                        own = within[k][owner] * follow[c] if (self.safe and owner == self.o) else within[k][owner]
+                        self._node_update(c, k, res[owner][1][c][k], own, weight, pos, neg, code)
+                if self.safe:
+                    self._gadget_update(res[self.o][0], weight, pos, neg, code)
+                continue
             for q in (0, 1):
                 follow = self._follow()
                 V, R, _, agg = self._pass(self.sigma, self._roots(follow), q, "cfr")
-                if agg is not None:
-                    self.leaf_cum[q] = [weight * a for a in agg] if self.leaf_cum[q] is None else \
-                        [x + weight * a for x, a in zip(self.leaf_cum[q], agg)]
-                    self.weight_sum[q] += weight
+                self._accumulate(q, agg, weight)
                 for c, lc in enumerate(self.classes):
                     within, _ = class_reach(lc.template, self.sigma[c], ones[c])  # each player's own reach in the street
                     for k, owner in enumerate(lc.template.players):
-                        if owner != q:
-                            continue
-                        own = within[k][q] * follow[c] if (self.safe and q == self.o) else within[k][q]
-                        reg = self.regret[c][k]
-                        A = reg.shape[-1]
-                        self.sigma[c][k] = np.ascontiguousarray(self.sigma[c][k])
-                        _update(reg.size, reg.reshape(-1, A), np.ascontiguousarray(R[c][k]).reshape(-1, A),
-                                self.sigma[c][k].reshape(-1, A), self.cum[c][k].reshape(-1, A),
-                                np.ascontiguousarray(own).reshape(-1), weight, pos, neg, code)
-                if self.safe and q == self.o:  # the gadget node: F pays o its root value, T pays cfv
-                    for c in range(len(self.classes)):
-                        g, w, x = self.g_sig[c], V[c][0], self.cfv[c]
-                        value = g[..., F] * w + g[..., T] * x
-                        inst = np.stack([w - value, x - value], axis=-1)
-                        _update(g.size, self.g_regret[c].reshape(-1, 2), np.ascontiguousarray(inst).reshape(-1, 2),
-                                g.reshape(-1, 2), self.g_cum[c].reshape(-1, 2), np.ones(g.size // 2), weight, pos,
-                                neg, code)
+                        if owner == q:
+                            own = within[k][q] * follow[c] if (self.safe and q == self.o) else within[k][q]
+                            self._node_update(c, k, R[c][k], own, weight, pos, neg, code)
+                if self.safe and q == self.o:
+                    self._gadget_update(V, weight, pos, neg, code)
         self.seconds += time.perf_counter() - start
+
+    def _accumulate(self, q: int, agg, weight: float) -> None:
+        if agg is not None:
+            self.leaf_cum[q] = [weight * a for a in agg] if self.leaf_cum[q] is None else \
+                [x + weight * a for x, a in zip(self.leaf_cum[q], agg)]
+            self.weight_sum[q] += weight
+
+    def _node_update(self, c: int, k: int, instant, own, weight, pos, neg, code) -> None:
+        reg = self.regret[c][k]
+        A = reg.shape[-1]
+        self.sigma[c][k] = np.ascontiguousarray(self.sigma[c][k])
+        _update(reg.size, reg.reshape(-1, A), np.ascontiguousarray(instant).reshape(-1, A),
+                self.sigma[c][k].reshape(-1, A), self.cum[c][k].reshape(-1, A), np.ascontiguousarray(own).reshape(-1),
+                weight, pos, neg, code)
+
+    def _gadget_update(self, V, weight, pos, neg, code) -> None:
+        """The gadget node: F pays o its root value V[c][0], T pays cfv."""
+        for c in range(len(self.classes)):
+            g, w, x = self.g_sig[c], V[c][0], self.cfv[c]
+            value = g[..., F] * w + g[..., T] * x
+            inst = np.stack([w - value, x - value], axis=-1)
+            _update(g.size, self.g_regret[c].reshape(-1, 2), np.ascontiguousarray(inst).reshape(-1, 2),
+                    g.reshape(-1, 2), self.g_cum[c].reshape(-1, 2), np.ones(g.size // 2), weight, pos, neg, code)
 
     # Results --------------------------------------------------------------------------------
 
@@ -225,16 +271,13 @@ class LeafGadget:
         avg = self.average_strategy()
         roots = self._roots(self._follow(avg=True))
         br, on, leaf = [None, None], [None, None], [None, None]
+        reach = self._reach(avg, roots)
+        aggs = self._leaf_both(reach[1])  # the closing reach is the same for both players
         for q in (0, 1):
-            Vb, _, _, agg = self._pass(avg, roots, q, "br")
+            Vb, _, _, agg = self._pass(avg, roots, q, "br", aggs[q], reach)
             br[q] = [v[0] for v in Vb]
             leaf[q] = agg
-            if agg is None:
-                Vc, _, _, _ = self._pass(avg, roots, q, "cfr")
-            else:  # the same leaf values (the closing reach is the same): one call per player
-                Vc = [class_values(lc.template, self.street, lc.contrib, avg[c],
-                                   class_reach(lc.template, avg[c], roots[c])[0], q, "cfr", False, agg[c])[0]
-                      for c, lc in enumerate(self.classes)]
+            Vc, _, _, _ = self._pass(avg, roots, q, "cfr", agg, reach)
             on[q] = [v[0] for v in Vc]
         p, o = self.p, self.o
         gap, ga = [], self.gadget_average() if self.safe else None

@@ -266,7 +266,48 @@ def test_one_deal_net_leaf_equals_the_trunk_leaf():
     d, lines = 11, [2, 9]
     one = tr.deal_leaf(model, equity[d], pots[0][lines], turn.kappa[d], boards[d], turn.valid[d], hands)
     sub = [tuple(x[d:d + 1, lines] for x in closing[0])]
+    both = one.values_both(1, sub)
     for p in (0, 1):
         want = full_leaf.values(p, 1, closing)[0][d, lines]
         got = one.values(p, 1, sub)[0][0]
         np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-15)
+        np.testing.assert_array_equal(both[p][0][0], got)  # one network pass for both players
+
+
+class _Both:
+    """A leaf with values_both built from values (to count calls)."""
+
+    def __init__(self, leaf):
+        self.leaf, self.calls = leaf, 0
+
+    def values(self, p, t, closing):
+        return self.leaf.values(p, t, closing)
+
+    def values_both(self, t, closing):
+        self.calls += 1
+        return self.leaf.values(0, t, closing), self.leaf.values(1, t, closing)
+
+
+def test_simultaneous_gadget():
+    # simultaneous updates: one values_both call per iteration (and one per evaluation), the
+    # same iterates as two values calls, and the gadget gap falls
+    game, full, upper, river = built("limit")
+    leaf = ReplayLeaf(full, river, random_hsig(full, 4)[2])
+    hsig = random_hsig(upper, 6)
+    reach = forward(upper, hsig)
+    roots = [r[0] for r in reach[1]]
+    d = [5, 40]
+    st = upper.streets[1].subset(d)
+    sub = SubsetLeaf(leaf, upper, d, np.arange(upper.classes[1][0].num_lines))
+    rp = [roots[0][0][d]]
+    bp = tr.blueprint_values(st, upper.classes[1], [[s[d] for s in hsig[1][0]]], [tuple(r[d] for r in roots[0])], sub)
+    a = LeafGadget(st, upper.classes[1], rp, bp["br"][1], 0, sub, simultaneous=True)
+    counted = _Both(sub)
+    b = LeafGadget(st, upper.classes[1], rp, bp["br"][1], 0, counted, simultaneous=True)
+    early = a.solve(10)["gap"][0].sum()
+    b.solve(10)
+    assert counted.calls == 11 and b.leaf_calls == 11
+    for x, y in zip(a.cum[0], b.cum[0]):
+        np.testing.assert_array_equal(x, y)
+    late = a.solve(80)["gap"][0].sum()
+    assert late < 0.5 * early

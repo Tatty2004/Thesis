@@ -256,9 +256,13 @@ class Spot:
             out["cfv"] = np.stack([bp["br"][q][0] for q in (0, 1)])
         return out
 
-    def resolve(self, s: dict, player: int, iters: int, tol=None, check_every: int = 10) -> tuple:
+    def resolve(self, s: dict, player: int, iters: int, tol=None, check_every: int = 10,
+                simultaneous: bool = False) -> tuple:
+        """simultaneous: both players updated from one profile, one network pass per iteration
+        (half the calls of alternating updates; LeafGadget)."""
         o = 1 - player
-        g = LeafGadget(s["street"], [s["cls"]], [s["reach"][player]], [s["cfv"][o]], player, s["leaf"])
+        g = LeafGadget(s["street"], [s["cls"]], [s["reach"][player]], [s["cfv"][o]], player, s["leaf"],
+                       simultaneous=simultaneous)
         ev = g.solve(iters, tol, check_every)
         return g, ev
 
@@ -311,6 +315,7 @@ def main(argv=None):
     ap.add_argument("--tol", type=float, help="stop once gap / mass <= tol (chips), checked every --check-every")
     ap.add_argument("--check-every", type=int, default=25)
     ap.add_argument("--cfv", default="auto", choices=["auto", "avg", "br"])
+    ap.add_argument("--simultaneous", action="store_true", help="simultaneous updates: one network pass per iteration")
     ap.add_argument("--node", type=int, default=None, help="turn template node to print (default: the root for "
                                                             "player 0, player 1's first node otherwise)")
     ap.add_argument("--top", type=int, default=30, help="hands to print (by reach)")
@@ -324,9 +329,9 @@ def main(argv=None):
     t0 = time.perf_counter()
     s = spot.setup(d, c, l, a.cfv)
     setup = time.perf_counter() - t0
-    g, ev = spot.resolve(s, a.player, a.iters, a.tol, a.check_every)
+    g, ev = spot.resolve(s, a.player, a.iters, a.tol, a.check_every, a.simultaneous)
     rep = report(spot, s, g, ev, a.player)
-    rep.update(setup_seconds=spot.setup_seconds, spot_setup_seconds=setup)
+    rep.update(setup_seconds=spot.setup_seconds, spot_setup_seconds=setup, simultaneous=a.simultaneous)
     tp = s["cls"].template
     node = a.node if a.node is not None else tp.players.index(a.player)
     acts, rows = strategy_table(spot, s, g, a.player, node)
