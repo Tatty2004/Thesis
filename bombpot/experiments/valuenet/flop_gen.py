@@ -126,8 +126,9 @@ class EquityPool:
         return np.concatenate([f.result() for f in futures])
 
     def close(self) -> None:
+        procs = list((getattr(self.pool, "_processes", None) or {}).values())  # None after shutdown
         self.pool.shutdown(wait=False, cancel_futures=True)
-        for p in list(getattr(self.pool, "_processes", {}).values()):
+        for p in procs:
             p.terminate()
 
 
