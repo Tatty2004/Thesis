@@ -39,7 +39,17 @@ endpoints).
 T values without a `--turn-cfv` trunk (`turn_resolve --cfv`): `backup` backs the trunk's
 averaged leaf values (`leafcfv.npy`) up through its average turn strategy, no network call;
 `onpolicy` is the average turn strategy's values with the network at its turn-end ranges.
-GATE_T_RESULT
+How close they are to `avg` (gate_t on the limit small deck, the gate's own 100-iteration trunk,
+`--trunk-file`; reach-weighted L1 distance over the size of `avg`, p0 / p1): backup 2.0% / 1.7%
+(signed +2.0% / +1.7%: a little above avg, the conservative side, like br), onpolicy 1.9% / 1.3%
+(signed -1.1% / -0.3%), br 3.5% / 2.7%. On the real deck (`g4pre_Td5c2s_As9h6c`, 300 iterations,
+30 random turn roots) the stand-ins agree with each other to 0.4% (onpolicy vs backup) and 0.3%
+(br vs backup), so there the choice hardly matters. Gate T grades of the composite (turn re-solve
++ river re-solve, exact exploitability; trunk 0.0251, avg 0.0231 @100 / 0.0200 @300):
+running (Slurm 32493358 backup / 32493359 onpolicy, from the saved trunk
+`/n/fs/scratch/rb5709/valuenet/live/gate_t_limit_trunk100.pkl`; results in
+`/n/fs/scratch/rb5709/valuenet/live/gate_t_limit_{backup,onpolicy}.json`). Pass = at most the
+trunk's 0.0251.
 
 Non-monotone gaps (the turn re-solve's gadget gap rising between checks, e.g. deal 84 'cc' p0
 3.8e-3 at 200 to 5.9e-3 at 300 iterations on the 20-iteration test trunk): `bench_turn_resolve

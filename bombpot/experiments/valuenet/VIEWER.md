@@ -67,9 +67,12 @@ opponent's values at the turn root) come, in this order (`--live-cfv auto`):
 2. `backup`: the trunk's averaged turn-end values (`leafcfv32.npy`) backed up through its average
    turn strategy, no network call and no new trunk. Same numbers as `avg` except that `avg`
    averages each iteration's turn strategy together with that iteration's turn-end values.
-   GATE_T_BACKUP
+   On the small deck backup is within 2% of avg (a little above it, the conservative side); on
+   the real deck the stand-ins agree with each other to 0.3-0.4% (README). Its gate T grade
+   was still running when this was written (`/n/fs/scratch/rb5709/valuenet/live/gate_t_limit_backup.json`).
 3. `onpolicy`: the average turn strategy's values with the network at its turn-end ranges (one
-   network call). GATE_T_ONPOLICY
+   network call). Within 1.3-1.9% of avg on the small deck (gate T grade:
+   `gate_t_limit_onpolicy.json`, same folder).
 
 The g4pre trunks have no `turncfv.npy`, so they use `backup`.
 
