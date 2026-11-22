@@ -1,0 +1,44 @@
+# Flop-end net for the noisy-vs-exact label test (2026-11-22, experiments/valuenet/PLAN_flopnet_test.md).
+# HandSetNet attention family as the turn nets (sweep_multi_*), scaled down (d128 L3) for <= ~7k samples.
+# Pass --data <arm shards> --eval-dir <exact held-out-pair shards> --limit N --epochs-for N [--target k50cfv].
+# Model selection: the arm's own validation split (10% of its flop-pair classes, salt flopnet-val, its own
+# label type); the exact eval set is only scored (eval_hand_mae).
+data:
+  dir: null
+  eval_dir: null
+  holdout_fraction: 0.1
+  block: 64
+  salt: flopnet-val
+  target: cfv
+  weight: range
+  split: flop_pair
+features:
+  method: hand_set
+  n_bins: 1035
+  board: onehot
+  num_ranks: 13
+  num_suits: 4
+  board_cards: 3
+  hand_extra: 2
+model:
+  kind: set
+  zero_sum: true
+  depth: 3
+  width: 128
+  heads: 4
+train:
+  epochs: 100
+  samples_seen: 1500000
+  min_epochs: 40
+  max_epochs: 400
+  schedule: cosine
+  amp: true
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0
+  huber_delta: 1.0
+  seed: 0
+  threads: 4
+  device: cuda
+  buffer_blocks: 8
+  clip: 1.0

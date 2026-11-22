@@ -20,6 +20,11 @@ exactly when the hand values do (sum_b h_p[b] target_p[b] = sum_i range_p[i] cfv
 the weighted loss is the per-hand loss minus the within-bin spread, which no per-bin output
 can remove (reported as the floor of the per-hand error).
 
+Flop-end shards (experiments/valuenet/flop_gen.py; FeatureConfig.board_cards 3) have no
+`turn`; their `equity` is the flop-end equity (the mean turn-end equity over the turn deals)
+and `equity_sd` (N, H, 2) its spread over the turn deals (FeatureConfig.hand_extra 2). They may
+hold other label sets beside cfv0 / cfv1 (e.g. k50cfv0 / k50cfv1), which `target` can name.
+
 Split. A sample belongs to the held-out set when the hash of its flop pair's isomorphism
 class falls below `holdout_fraction`. The class key is the smallest (sorted flops, flops in
 order) over every relabeling of the suits and both board orders, so strategically identical
@@ -86,12 +91,12 @@ def featurize(raw: dict, cfg: FeatureConfig, target: str = "cfv", weight: str = 
     their share of the possible hands; `raw` then needs `possible`). The inputs h0, h1 are the
     range histograms either way. With "hands" a bin the player's range leaves empty is still
     trained, which a solver needs: it asks what a hand would be worth if it came here."""
-    boards = np.concatenate([raw["flops"], raw["turn"][..., None]], axis=-1)
+    boards = np.concatenate([raw["flops"], raw["turn"][..., None]], axis=-1) if "turn" in raw else raw["flops"]
     bins = bin_index(raw["equity"], cfg)
     B = cfg.num_bins
     out = {"board": encode_boards(boards, cfg), "scalars": pot_features(raw["pot"], raw["stack"]), "bins": bins}
     if cfg.method == "hand_set":  # per-hand descriptors and card ids (`raw` then needs `hands`)
-        out["hx"] = hand_features(raw["equity"], raw["hands"], boards, cfg)
+        out["hx"] = hand_features(raw["equity"], raw["hands"], boards, cfg, raw.get("equity_sd"))
         out["hc"] = np.broadcast_to(hand_cards(raw["hands"]), bins.shape + (2,)).astype(np.int16)
     for p in (0, 1):
         r, v = raw[f"range{p}"], raw[f"{target}{p}"]
@@ -114,24 +119,31 @@ class ShardSet:
 
     def __init__(self, directory, cfg: FeatureConfig, holdout_fraction: float = 0.1, block: int = 512,
                  salt: str = "valuenet-split", target: str = "cfv", weight: str = "range",
-                 split: str = "flop_pair"):
+                 split: str = "flop_pair", limit: int | None = None):
         """split: "flop_pair" (whole isomorphism classes of flop pairs are held out; the
         default) or "sample" (a random `holdout_fraction` of each shard's rows, fixed by the
-        salt and the shard's name: for shards of a single flop pair)."""
+        salt and the shard's name: for shards of a single flop pair). limit: use only the
+        first `limit` rows (shards in name order), both sides of the split together, for
+        learning curves on nested subsets."""
         import h5py
 
-        if target not in ("cfv", "br"):
-            raise ValueError(f"unknown target {target!r}")
         if weight not in ("range", "hands"):
             raise ValueError(f"unknown weight {weight!r}")
         self.cfg, self.block, self.target, self.weight = cfg, block, target, weight
         self.fields = tuple(k for k in FIELDS if not k.startswith("cfv")) + (f"{target}0", f"{target}1")
+        if cfg.board_cards == 3:  # flop-end shards: no turn card
+            self.fields = tuple(k for k in self.fields if k != "turn")
+        if cfg.hand_extra:
+            self.fields += ("equity_sd",)
         if weight == "hands":
             self.fields += ("possible",)
         self.paths = sorted(Path(directory).glob("*.h5"))
         if not self.paths:
             raise FileNotFoundError(f"no *.h5 shards in {directory}")
         self.files = [h5py.File(p, "r") for p in self.paths]
+        missing = [k for k in self.fields if k not in self.files[0]]
+        if missing:
+            raise ValueError(f"{self.paths[0]} has no {missing} (target {target!r})")
         self._hand_lists: dict = {}
         if split == "flop_pair":
             self.heldout = [heldout_mask(f["flops"][:], holdout_fraction, salt, cfg.num_suits) for f in self.files]
@@ -142,13 +154,21 @@ class ShardSet:
                 self.heldout.append(np.random.default_rng(seed).random(len(f["pot"])) < holdout_fraction)
         else:
             raise ValueError(f"unknown split {split!r}")
+        self.use = [np.ones(len(m), bool) for m in self.heldout]
+        if limit is not None:
+            left = int(limit)
+            for u in self.use:
+                u[left:] = False
+                left = max(left - len(u), 0)
 
     def close(self) -> None:
         for f in self.files:
             f.close()
 
     def count(self, split: str) -> int:
-        return int(sum((m if split == "heldout" else ~m).sum() for m in self.heldout))
+        if split == "all":
+            return int(sum(u.sum() for u in self.use))
+        return int(sum(((m if split == "heldout" else ~m) & u).sum() for m, u in zip(self.heldout, self.use)))
 
     def _blocks(self):
         return [(i, a) for i, f in enumerate(self.files) for a in range(0, len(f["pot"]), self.block)]
@@ -163,6 +183,7 @@ class ShardSet:
             keep = ~keep
         elif split == "all":
             keep = np.ones_like(keep)
+        keep = keep & self.use[i][a:b]
         if not keep.any():
             return None
         raw = {k: f[k][a:b][keep] for k in self.fields}

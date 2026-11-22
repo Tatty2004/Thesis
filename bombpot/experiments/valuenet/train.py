@@ -23,6 +23,10 @@ Each epoch logs to results/valuenet/net/<run>/log.csv:
                                             players, over held-out samples, in pots
   heldout_hand_mae_floor                    the same for the exact bin means: the within-bin
                                             spread, which per-bin outputs can't resolve
+With data.eval_dir, every epoch also scores the model on all samples of that directory (an
+exact test set kept apart from the training data, e.g. flop-end labels of held-out flop
+pairs): eval_loss, eval_hand_mae, eval_hand_mae_floor. It plays no part in training or model
+selection. data.limit uses only the first N samples of data.dir (both sides of its split).
 The best held-out model goes to best.pt (valuenet.model.load_model), with config.yaml and
 meta.json (git, device, GPU) beside it; summary.json at the end.
 
@@ -47,7 +51,8 @@ from bombpot.experiments.run import RESULTS, ROOT, git_info
 
 NET = RESULTS / "valuenet" / "net"
 DEFAULTS = {
-    "data": {"dir": None, "holdout_fraction": 0.2, "block": 512, "salt": "valuenet-split", "target": "cfv", "weight": "range", "split": "flop_pair"},
+    "data": {"dir": None, "holdout_fraction": 0.2, "block": 512, "salt": "valuenet-split", "target": "cfv", "weight": "range", "split": "flop_pair",
+             "eval_dir": None, "limit": None},
     "features": {"method": "joint_2d", "n_bins": 20, "board": "onehot", "num_ranks": 13, "num_suits": 4},
     "model": {"depth": 7, "width": 500, "zero_sum": True},
     "train": {"epochs": 50, "batch_size": 1024, "lr": 1e-3, "weight_decay": 0.0, "schedule": "cosine",
@@ -158,8 +163,10 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
     rng = np.random.default_rng(tc["seed"])
     device = pick_device(tc["device"])
     fcfg = FeatureConfig(**cfg["features"])
-    shards = ShardSet(cfg["data"]["dir"], fcfg, cfg["data"]["holdout_fraction"], cfg["data"]["block"],
-                      cfg["data"]["salt"], cfg["data"]["target"], cfg["data"]["weight"], cfg["data"]["split"])
+    dc = cfg["data"]
+    shards = ShardSet(dc["dir"], fcfg, dc["holdout_fraction"], dc["block"], dc["salt"], dc["target"], dc["weight"],
+                      dc["split"], limit=dc["limit"])
+    test = ShardSet(dc["eval_dir"], fcfg, 0.0, dc["block"], target="cfv", weight=dc["weight"]) if dc["eval_dir"] else None
     n_train, n_held = shards.count("train"), shards.count("heldout")
     if n_held == 0 or n_train == 0:
         raise ValueError(f"split has {n_train} training and {n_held} held-out samples")
@@ -191,13 +198,13 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
     meta = {**git_info(), "device": str(device), "torch": torch.__version__, "host": platform.node(),
             "cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
             "slurm_job": os.environ.get("SLURM_JOB_ID"), "train_samples": n_train, "heldout_samples": n_held,
-            "shards": [str(p) for p in shards.paths],
+            "shards": [str(p) for p in shards.paths], "eval_samples": test.count("all") if test else 0,
             "parameters": sum(p.numel() for p in model.parameters())}
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
     log(f"device {device} gpu {meta['gpu']} | train {n_train} held-out {n_held} | params {meta['parameters']}")
 
     fields = ["epoch", "seconds", "lr", "train_loss", "heldout_loss", "heldout_zero_loss", "heldout_hand_mae",
-              "heldout_hand_mae_floor"]
+              "heldout_hand_mae_floor"] + (["eval_loss", "eval_hand_mae", "eval_hand_mae_floor"] if test else [])
     start, best, rows = time.perf_counter(), math.inf, []
     delta, bs = tc["huber_delta"], tc["batch_size"]
     with open(run_dir / "log.csv", "w", newline="") as fh:
@@ -233,6 +240,9 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
                    "train_loss": tot / max(wsum, 1e-300), "heldout_loss": ev["loss"],
                    "heldout_zero_loss": ev["zero_loss"], "heldout_hand_mae": ev["hand_mae"],
                    "heldout_hand_mae_floor": ev["hand_mae_floor"]}
+            if test is not None:
+                et = evaluate(model, test, "all", device, delta, 4 * bs)
+                row.update(eval_loss=et["loss"], eval_hand_mae=et["hand_mae"], eval_hand_mae_floor=et["hand_mae_floor"])
             writer.writerow(row)
             fh.flush()
             rows.append(row)
@@ -248,8 +258,11 @@ def train(cfg: dict, run_dir: Path, log=print) -> dict:
                 log(f"time budget of {tc['time_budget_minutes']} minutes reached after epoch {epoch}")
                 break
     shards.close()
+    if test is not None:
+        test.close()
     best_row = min(rows, key=lambda r: r["heldout_loss"])
-    summary = {"epochs": len(rows), "best": best_row, "first": rows[0], "seconds": rows[-1]["seconds"], **meta}
+    summary = {"epochs": len(rows), "best": best_row, "first": rows[0], "last": rows[-1],
+               "seconds": rows[-1]["seconds"], **meta}
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary
 
@@ -278,19 +291,36 @@ def main(argv=None) -> None:
     ap.add_argument("--epochs", type=int)
     ap.add_argument("--max-minutes", type=float)
     ap.add_argument("--init", help="start from this saved model's weights")
+    ap.add_argument("--limit", type=int, help="use only the first N samples (data.limit)")
+    ap.add_argument("--eval-dir", help="exact test shards scored every epoch (data.eval_dir)")
+    ap.add_argument("--target", help="label set (data.target), e.g. cfv or k50cfv")
+    ap.add_argument("--seed", type=int, help="train.seed")
+    ap.add_argument("--epochs-for", type=int, help="set train.epochs to max(min_epochs, min(max_epochs, "
+                                                   "samples_seen / N)) for N samples (train.samples_seen etc.)")
     ap.add_argument("--synthetic", action="store_true", help="write synthetic shards first if the directory has none")
     a = ap.parse_args(argv)
     path = Path(a.config)
     cfg = merged(yaml.safe_load(path.read_text()))
     if a.data:
         cfg["data"]["dir"] = a.data
+    for key, val in (("limit", a.limit), ("eval_dir", a.eval_dir), ("target", a.target)):
+        if val is not None:
+            cfg["data"][key] = val
+    if a.seed is not None:
+        cfg["train"]["seed"] = a.seed
+    if a.epochs_for:  # a learning-curve point: about the same number of samples seen, within bounds
+        tc = cfg["train"]
+        tc["epochs"] = int(max(tc.get("min_epochs", 30), min(tc.get("max_epochs", 400),
+                                                            round(tc.get("samples_seen", 1.5e6) / a.epochs_for))))
     for key, val in (("device", a.device), ("epochs", a.epochs), ("max_minutes", a.max_minutes), ("init", a.init)):
         if val is not None:
             cfg["train"][key] = val
     if cfg["data"]["dir"] is None:
         raise SystemExit("no data directory: set data.dir or --data")
-    d = Path(cfg["data"]["dir"])
-    cfg["data"]["dir"] = str(d if d.is_absolute() else ROOT / d)
+    for key in ("dir", "eval_dir"):
+        if cfg["data"][key] is not None:
+            d = Path(cfg["data"][key])
+            cfg["data"][key] = str(d if d.is_absolute() else ROOT / d)
     if a.synthetic:
         make_synthetic(cfg)
     run = a.run or path.stem
@@ -299,6 +329,9 @@ def main(argv=None) -> None:
     print(f"best epoch {b['epoch']}: held-out loss {b['heldout_loss']:.6g} (zero {b['heldout_zero_loss']:.6g}), "
           f"hand MAE {b['heldout_hand_mae']:.6g} pots (floor {b['heldout_hand_mae_floor']:.6g}); "
           f"{summary['seconds']:.0f} s on {summary['device']} {summary['gpu'] or ''}")
+    if "eval_hand_mae" in b:
+        print(f"eval (data.eval_dir) hand MAE at that epoch {b['eval_hand_mae']:.6g} pots, "
+              f"at the last epoch {summary['last']['eval_hand_mae']:.6g}")
 
 
 if __name__ == "__main__":

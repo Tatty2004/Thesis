@@ -44,7 +44,11 @@ class FeatureConfig:
     board        "onehot" (rank one-hots and suit patterns, `board_features`), "ids" (card
                  ids for a learned embedding, `board_ids`), or "none"
     num_ranks, num_suits   the deck, for decoding card ids
-    board_cards  cards per board at the end of the turn
+    board_cards  cards per board where the network sits: 4 at the end of the turn (the
+                 default), 3 at the end of the flop (a flop-end network)
+    hand_extra   extra per-hand features appended to `hand_features` (method "hand_set"):
+                 0, or 2 for a flop-end network (the spread of the turn-end equity over the
+                 turn deals, board A and B: the shards' `equity_sd`)
     """
     method: str = "joint_2d"
     n_bins: int = 20
@@ -52,6 +56,7 @@ class FeatureConfig:
     num_ranks: int = 13
     num_suits: int = 4
     board_cards: int = 4
+    hand_extra: int = 0
 
     def __post_init__(self):
         if self.method not in METHODS:
@@ -157,14 +162,16 @@ def hand_cards(hands: np.ndarray) -> np.ndarray:
     return -np.sort(-np.asarray(hands, dtype=np.int64), axis=-1)
 
 
-def hand_features(equity: np.ndarray, hands: np.ndarray, boards: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
-    """Per-hand descriptors, (..., H, HAND_FEATURES) float32, from `equity` (..., H, 2), the
-    hand list `hands` ((H, 2) or (..., H, 2) card ids) and `boards` (..., 2, k):
-      0-1   turn-end equity on board A and B
+def hand_features(equity: np.ndarray, hands: np.ndarray, boards: np.ndarray, cfg: FeatureConfig,
+                  extra: np.ndarray | None = None) -> np.ndarray:
+    """Per-hand descriptors, (..., H, HAND_FEATURES + cfg.hand_extra) float32, from `equity`
+    (..., H, 2), the hand list `hands` ((H, 2) or (..., H, 2) card ids) and `boards` (..., 2, k):
+      0-1   equity on board A and B (turn-end; for a flop-end network the flop-end equity)
       2     1 if the hand can be held (neither card on a board)
       3-6   for the hand's higher card then its lower card, on board A then B: the share of
             the board's cards with the card's rank
       7-10  the same for the card's suit
+      11-   `extra` (..., H, cfg.hand_extra), when cfg.hand_extra > 0
     Everything is relative to the boards; which hand is which only enters through the cards."""
     equity, boards = np.asarray(equity), np.asarray(boards, dtype=np.int64)
     lead = equity.shape[:-2]
@@ -176,20 +183,24 @@ def hand_features(equity: np.ndarray, hands: np.ndarray, boards: np.ndarray, cfg
     rank = ((x // S) == (b // S)).sum(-1) / k                  # (..., H, 2 cards, 2 boards)
     suit = ((x % S) == (b % S)).sum(-1) / k
     H = c.shape[-2]
-    return np.concatenate([equity, possible[..., None], rank.reshape(lead + (H, 4)),
-                           suit.reshape(lead + (H, 4))], axis=-1).astype(np.float32)
+    parts = [equity, possible[..., None], rank.reshape(lead + (H, 4)), suit.reshape(lead + (H, 4))]
+    if cfg.hand_extra:
+        if extra is None or np.shape(extra)[-1] != cfg.hand_extra:
+            raise ValueError(f"hand_extra {cfg.hand_extra} needs `extra` (..., H, {cfg.hand_extra})")
+        parts.append(np.broadcast_to(np.asarray(extra), lead + (H, cfg.hand_extra)))
+    return np.concatenate(parts, axis=-1).astype(np.float32)
 
 
 # Boards, pot and stack --------------------------------------------------------------------
 
 
 def canonical_boards(boards: np.ndarray, cfg: FeatureConfig) -> np.ndarray:
-    """(..., 2, k) card ids with each board's flop (all but its last card) sorted by rank
-    then suit, high first, and the turn card last. Card order within a flop carries no
-    information, so this makes the encoding independent of it."""
+    """(..., 2, k) card ids with each board's flop (its first 3 cards) sorted by rank then
+    suit, high first, and any later card (the turn) after it in order. Card order within a
+    flop carries no information, so this makes the encoding independent of it."""
     boards = np.asarray(boards, dtype=np.int64)
-    flop = -np.sort(-boards[..., :-1], axis=-1)  # card id order is rank-major
-    return np.concatenate([flop, boards[..., -1:]], axis=-1)
+    flop = -np.sort(-boards[..., :3], axis=-1)  # card id order is rank-major
+    return np.concatenate([flop, boards[..., 3:]], axis=-1)
 
 
 def board_features(boards: np.ndarray, cfg: FeatureConfig) -> np.ndarray:

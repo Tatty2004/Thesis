@@ -161,8 +161,8 @@ class HandSetNet(nn.Module):
         self.register_buffer("card_desc", desc, persistent=False)
         board_width = features.board_dim * (config.embed_dim if features.board == "ids" else 1)
         self.glob = nn.Sequential(nn.Linear(board_width + NUM_SCALARS, d), nn.GELU(), nn.Linear(d, d))
-        self.enc = nn.Sequential(nn.Linear(2 * (config.embed_dim + R + S) + 2 + HAND_FEATURES + 4, d), nn.GELU(),
-                                 nn.Linear(d, d))
+        hand_in = 2 * (config.embed_dim + R + S) + 2 + HAND_FEATURES + features.hand_extra + 4
+        self.enc = nn.Sequential(nn.Linear(hand_in, d), nn.GELU(), nn.Linear(d, d))
         self.blocks = nn.ModuleList(SetBlock(d, C, config.heads, config.card_context, config.dropout)
                                     for _ in range(config.depth))
         self.dec = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(), nn.Linear(d, 2))
