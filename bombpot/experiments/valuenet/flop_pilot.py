@@ -1,8 +1,16 @@
 """Analysis of the flop-end sample cost pilot (flop_datagen.py): label error of cheap variants
 against the full solve, and the cost of each.
 
-    python -m bombpot.experiments.valuenet.flop_pilot --ref DIR/sample_*_all.npz \
-        [--variants DIR/sample_*_<K>*.npz] --out results/valuenet/flopnet_pilot/pilot.json
+    python -m bombpot.experiments.valuenet.flop_pilot run --model M --flops F --equity E --seed S \
+        --out results/valuenet/flopnet_pilot/runs      (one GPU job per state: everything below)
+    python -m bombpot.experiments.valuenet.flop_pilot summarize --json runs/*.json --out pilot.json
+    python -m bombpot.experiments.valuenet.flop_pilot files --ref ...npz [--variants ...npz] --out X.json
+
+`run` keeps the per-deal arrays in memory (scratch was full on 2026-11-22: about 100 MB per state
+as files) and writes only <out>/<state>.json (the analysis) and a small <state>.npz (ranges and
+the reference labels). In the same job, on the same state: the reference (every deal, alternating
+DCFR, --iters), the check-down proxy, a simultaneous-update run on a fixed sample of --sim-deals
+deals, and timing runs on K deals (--time-K, --time-iters iterations each).
 
 Reference: every turn deal, the last check (e.g. 300 alternating DCFR iterations). Error metric =
 train.py's hand_mae: sum over both players and hands of range x |label - reference| / (sum of
@@ -120,7 +128,153 @@ def analyse_variant(v: dict, refs: dict) -> dict | None:
     return rec
 
 
+def as_record(rec: dict, state: dict, deals, info: dict, path: str) -> dict:
+    """flop_datagen.solve_state's output in the layout of a saved sample (load())."""
+    out = {k: np.asarray(v) for k, v in rec.items() if k != "setup_seconds" and len(v)}
+    out.update(range0=state["range0"], range1=state["range1"], line=state["line"], pot=state["pot"],
+               deals=np.asarray(deals), path=path, info={**info, "setup_seconds": rec["setup_seconds"]})
+    return out
+
+
+def run(argv=None):
+    import time
+
+    import torch
+
+    from bombpot.experiments.valuenet import datagen as dg
+    from bombpot.experiments.valuenet import flop_datagen as fd
+    from bombpot.valuenet.model import load_model
+
+    ap = argparse.ArgumentParser(description="the pilot on one state, in one job")
+    ap.add_argument("--model", required=True)
+    ap.add_argument("--flops", required=True)
+    ap.add_argument("--deck", default="13,4")
+    ap.add_argument("--equity", required=True)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--line", type=int, default=-1)
+    ap.add_argument("--iters", type=int, default=300)
+    ap.add_argument("--checks", default="10,25,50,100,200,300")
+    ap.add_argument("--sim-deals", type=int, default=200)
+    ap.add_argument("--time-K", default="25,50,100,200")
+    ap.add_argument("--time-iters", type=int, default=50)
+    ap.add_argument("--K", default="10,25,50,100,200,400")
+    ap.add_argument("--draws", type=int, default=200)
+    ap.add_argument("--no-amp", action="store_true")
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+    dev = a.device
+    nr, ns = (int(x) for x in a.deck.split(","))
+    amp = not a.no_amp
+    fe = fd.FlopEnd(fd.parse_flops(a.flops, nr, ns), nr, ns, np.load(a.equity))
+    model = load_model(a.model, dev)
+    gpu = torch.cuda.get_device_name(0) if dev == "cuda" else dev
+    print(f"{a.flops} seed {a.seed} on {gpu}", flush=True)
+    rng = np.random.default_rng(a.seed)
+    state = fd.sample_state(fe, rng, fe.strength(), a.line)
+    checks = sorted({int(x) for x in a.checks.split(",")} | {a.iters})
+    name = f"{a.flops.replace(',', '_')}_s{a.seed}"
+    base = {"flops": a.flops, "num_deals": fe.D, "per_pair": fe.per_pair, "gpu": gpu, "git": dg.git_hash(),
+            "equity_seconds": 0.0}
+    log = lambda m: print(m, flush=True)  # noqa: E731
+    print(f"reference: line {state['line']} pot {state['pot']:g}, all {fe.D} deals, {a.iters} iterations", flush=True)
+    deals = np.arange(fe.D)
+    rec = fd.solve_state(fe, model, state, deals, a.iters, checks, device=dev, amp=amp, log=log)
+    ref = as_record(rec, state, deals, {**base, "args": {"seed": a.seed, "simultaneous": False, "deck": a.deck}},
+                    name + "_ref")
+    ref["flops"] = np.array(fe.game.flops)
+    ref["proxy"], proxy_seconds = fd.proxy_values(fe, model, state, deals, dev, amp=amp)
+    print(f"proxy: {proxy_seconds:.1f}s", flush=True)
+    variants = []
+    S = np.sort(np.random.default_rng([7, a.seed]).choice(fe.D, a.sim_deals, replace=False))
+    print(f"simultaneous on {len(S)} deals", flush=True)
+    rec = fd.solve_state(fe, model, state, S, a.iters, checks, device=dev, amp=amp, simultaneous=True, log=log)
+    variants.append(as_record(rec, state, S, {**base, "args": {"seed": a.seed, "simultaneous": True, "deck": a.deck}},
+                              name + f"_sim{len(S)}"))
+    for K in (int(x) for x in a.time_K.split(",")):
+        T = np.sort(np.random.default_rng([11, a.seed, K]).choice(fe.D, K, replace=False))
+        t0 = time.perf_counter()
+        eq = fe.equity_all
+        fe.equity_all, fe._eq = None, {}  # time the equities of a sample's deals too (no cache in production)
+        fe.equity(T)
+        eq_s = time.perf_counter() - t0
+        fe.equity_all = eq
+        print(f"alternating on {K} deals, {a.time_iters} iterations (equities {eq_s:.1f}s CPU)", flush=True)
+        rec = fd.solve_state(fe, model, state, T, a.time_iters, [c for c in checks if c <= a.time_iters],
+                             device=dev, amp=amp, log=log)
+        variants.append(as_record(rec, state, T, {**base, "equity_seconds": eq_s,
+                                                  "args": {"seed": a.seed, "simultaneous": False, "deck": a.deck}},
+                                  name + f"_alt{K}"))
+    refs = {(a.flops, a.seed): ref}
+    result = {"ref": analyse_ref(ref, [int(x) for x in a.K.split(",")], a.draws, a.seed),
+              "variants": [analyse_variant(v, refs) for v in variants], "proxy_seconds": proxy_seconds}
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{name}.json").write_text(json.dumps(result, indent=1, default=float))
+    np.savez_compressed(out / f"{name}.npz", range0=state["range0"].astype(np.float32),
+                        range1=state["range1"].astype(np.float32), line=state["line"], pot=state["pot"],
+                        checks=np.array(checks), label_cfv=ref["label_cfv"], label_br=ref["label_br"])
+    print(f"wrote {out / name}.json", flush=True)
+    print("DONE", flush=True)
+
+
+def summarize(argv=None):
+    ap = argparse.ArgumentParser(description="combine run JSONs")
+    ap.add_argument("--json", nargs="+", required=True)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+    runs = [json.loads(Path(p).read_text()) for p in a.json]
+    rows = [r["ref"] for r in runs]
+    var = [v for r in runs for v in r["variants"] if v is not None]
+    write_summary(rows, var, a.out)
+
+
+def write_summary(rows, var, path) -> None:
+    summary = {"samples": len(rows), "iters": {}, "sampled": {}}
+    for c in rows[0]["iters"]:
+        summary["iters"][c] = float(np.mean([r["iters"][c] for r in rows if c in r["iters"]]))
+    for k in rows[0]["sampled"]:
+        summary["sampled"][k] = {m: float(np.mean([r["sampled"][k][m] for r in rows if k in r["sampled"]]))
+                                 for m in ("mae", "mae_p90", "mae_of_mean")}
+    summary["ref_mean_abs"] = float(np.mean([r["ref_mean_abs"] for r in rows]))
+    summary["br_minus_cfv"] = float(np.mean([r["br_minus_cfv"] for r in rows]))
+    if all("proxy_mae" in r for r in rows):
+        summary["proxy_mae"] = float(np.mean([r["proxy_mae"] for r in rows]))
+    leaf_ms = [1e3 * r["leaf_seconds"][-1] / r["leaf_rows"][-1] for r in rows]
+    summary["ref"] = {"ms_per_network_row": float(np.mean(leaf_ms)), "by_sample": leaf_ms,
+                      "gpus": [r["gpu"] for r in rows],
+                      "seconds": [r["seconds"][-1] for r in rows],
+                      "network_share": float(np.mean([r["leaf_seconds"][-1] / r["seconds"][-1] for r in rows])),
+                      "exploitability": {c: float(np.mean([r["exploitability"][i] for r in rows]))
+                                         for i, c in enumerate(rows[0]["checks"])}}
+    groups: dict = {}
+    for v in var:
+        groups.setdefault((v["deals"], v["simultaneous"]), []).append(v)
+    summary["variants"] = {}
+    for (K, sim), vs in sorted(groups.items()):
+        cks = vs[0]["checks"]
+        summary["variants"][f"{'sim' if sim else 'alt'}_K{K}"] = {
+            "seconds_per_iteration": float(np.mean([v["seconds"][-1] / v["checks"][-1] for v in vs])),
+            "network_ms_per_row": float(np.mean([1e3 * v["leaf_seconds"][-1] / v["leaf_rows"][-1] for v in vs])),
+            "equity_seconds": float(np.mean([v["equity_seconds"] for v in vs])),
+            "vs_ref_same_deals": {c: float(np.mean([v["vs_ref_same_deals"][str(c)] if str(c) in v["vs_ref_same_deals"]
+                                                    else v["vs_ref_same_deals"][c] for v in vs])) for c in cks},
+            "exploitability": {c: float(np.mean([v["exploitability"][i] for v in vs])) for i, c in enumerate(cks)}}
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps({"summary": summary, "refs": rows, "variants": var}, indent=1, default=float))
+    print(json.dumps(summary, indent=1, default=float))
+
+
 def main(argv=None):
+    import sys
+
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "run":
+        return run(argv[1:])
+    if argv and argv[0] == "summarize":
+        return summarize(argv[1:])
+    if argv and argv[0] == "files":
+        argv = argv[1:]
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--ref", nargs="+", required=True)
     ap.add_argument("--variants", nargs="*", default=[])
@@ -137,24 +291,7 @@ def main(argv=None):
         rows.append(analyse_ref(s, Ks, a.draws, a.seed))
         print(f"{p}: iters {rows[-1]['iters']}", flush=True)
     var = [r for r in (analyse_variant(load(p), refs) for p in a.variants) if r is not None]
-    # summary: mean over reference samples of every variant's error
-    summary = {"iters": {}, "sampled": {}}
-    for c in rows[0]["iters"]:
-        summary["iters"][c] = float(np.mean([r["iters"][c] for r in rows if c in r["iters"]]))
-    for k in rows[0]["sampled"]:
-        summary["sampled"][k] = {m: float(np.mean([r["sampled"][k][m] for r in rows if k in r["sampled"]]))
-                                 for m in ("mae", "mae_p90", "mae_of_mean")}
-    summary["ref_mean_abs"] = float(np.mean([r["ref_mean_abs"] for r in rows]))
-    summary["br_minus_cfv"] = float(np.mean([r["br_minus_cfv"] for r in rows]))
-    if all("proxy_mae" in r for r in rows):
-        summary["proxy_mae"] = float(np.mean([r["proxy_mae"] for r in rows]))
-    leaf_ms = [1e3 * r["leaf_seconds"][-1] / r["leaf_rows"][-1] for r in rows]
-    summary["ms_per_network_row"] = {"mean": float(np.mean(leaf_ms)), "by_sample": leaf_ms,
-                                     "gpus": [r["gpu"] for r in rows]}
-    summary["network_share"] = float(np.mean([r["leaf_seconds"][-1] / r["seconds"][-1] for r in rows]))
-    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(a.out).write_text(json.dumps({"summary": summary, "refs": rows, "variants": var}, indent=1, default=float))
-    print(json.dumps(summary, indent=1, default=float))
+    write_summary(rows, var, a.out)
 
 
 if __name__ == "__main__":
