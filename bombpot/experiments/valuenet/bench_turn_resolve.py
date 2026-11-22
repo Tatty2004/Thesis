@@ -23,6 +23,59 @@ import numpy as np
 from bombpot.experiments.valuenet.turn_resolve import Spot, report
 
 
+def profile_leaf(spot, s: dict, n: int, compile_modes=()) -> dict:
+    """Seconds per network leaf call at one spot (13 rows): the whole values_both call, the
+    network's forward alone on the same inputs, and with torch.compile modes."""
+    import torch
+
+    from bombpot.core.solvers.range_cfr import class_reach, stack_closing
+
+    leaf, cls = s["leaf"], s["cls"]
+    tp = cls.template
+    sig = [np.full(s["reach"].shape[1:] + (len(a),), 1.0 / len(a)) for a in tp.actions]
+    _, closing = class_reach(tp, sig, (s["reach"][0], s["reach"][1]))
+    cl = stack_closing([closing])
+    sync = (lambda: torch.cuda.synchronize()) if spot.device == "cuda" else (lambda: None)
+
+    def timed(f):
+        f()
+        sync()
+        t0 = time.perf_counter()
+        for _ in range(n):
+            f()
+        sync()
+        return (time.perf_counter() - t0) / n
+
+    out = {"call": timed(lambda: leaf.values_both(1, cl)), "call_one_player": timed(lambda: leaf.values(0, 1, cl))}
+    rep = leaf.replicas[0]
+    dev, H = rep["device"], leaf.H
+    rows = cl[0][0].shape[1] * cl[0][0].shape[2]
+    d = torch.zeros(rows, dtype=torch.long, device=dev)
+    hist = torch.full((rows, H), 1.0 / H, device=dev, dtype=leaf.dtype)
+    board = rep["board"][d] if leaf.cfg.board == "ids" else rep["board"][d].to(leaf.dtype)
+    scal = torch.zeros(rows, 2, device=dev, dtype=leaf.dtype)
+    hand = {"hx": rep["hx"][d], "hc": rep["hc"].expand(rows, H, 2)}
+    model = rep["model"]
+
+    def fwd(m):
+        def f():
+            with torch.no_grad(), torch.autocast("cuda", enabled=leaf.amp and dev.type == "cuda"):
+                m(board, scal, hist, hist, **hand)
+        return f
+
+    out["forward"] = timed(fwd(model))
+    for mode in compile_modes:
+        try:
+            t0 = time.perf_counter()
+            cm = torch.compile(model, mode=mode)
+            fwd(cm)()
+            out[f"compile_{mode}_seconds"] = time.perf_counter() - t0
+            out[f"forward_compiled_{mode}"] = timed(fwd(cm))
+        except Exception as e:  # report, don't fail the bench
+            out[f"compile_{mode}_error"] = repr(e)[:300]
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--trunk", required=True)
@@ -34,6 +87,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--modes", default="alt,sim", help="alt (alternating updates), sim (simultaneous)")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--profile", type=int, default=0, help="also time N network calls at the first spot")
+    ap.add_argument("--compile", default="", help="torch.compile modes to time in --profile, e.g. reduce-overhead")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     import torch
@@ -52,6 +107,10 @@ def main(argv=None):
     spot.resolve(s, 0, 20)
     res["warmup_seconds"] = time.perf_counter() - t0
     print(f"{dev}: setup {spot.setup_seconds:.1f}s, warm-up {res['warmup_seconds']:.1f}s", flush=True)
+    if a.profile:
+        res["profile"] = profile_leaf(spot, s, a.profile, [m for m in a.compile.split(",") if m])
+        print("profile (seconds per call):", json.dumps(res["profile"]), flush=True)
+        out.write_text(json.dumps(res, indent=1, default=float))
     for d, l in picks:
         t0 = time.perf_counter()
         s = spot.setup(d, 0, l, a.cfv)
