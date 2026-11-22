@@ -1,5 +1,32 @@
 # Value-net experiments
 
+## Safe turn re-solving (2026-11-22, branch vn-turn)
+
+`turn_resolve.py --trunk DIR --flop-line r0.5c --turn 5h2c [--player 0] [--iters 300] [--cfv auto|avg|br]
+[--simultaneous]` re-solves one turn root (one turn deal after one flop line) for one player
+with the gadget of `core/solvers/leaf_resolve.py` (resolve.py's, one street up), the network
+valuing every turn end exactly as the trunk does (a one-deal `NetLeaf`), and prints the
+re-solved turn strategy. T values: `avg` = the trunk's turn-root values averaged over its
+iterations (`real_trunk --turn-cfv` writes `turncfv.npy`, 445 MB for one flop pair), `br` = the
+opponent's best response to the trunk's turn (needs only `strategy.npz`; one slice is read).
+
+Real deck, trunk `real/attn_op1_r2_it300`, one GPU (`bench_turn_resolve.py`, 6 random roots x
+both players, network on the GPU with AMP, the turn tree on the CPU), seconds per re-solve:
+
+| GPU | 100 its alt | 300 its alt | 100 its sim | 300 its sim |
+|---|---|---|---|---|
+| RTX 2080 Ti | 1.8-2.1 | 5.4-6.2 | 1.0 | 3.1 |
+| RTX 3090 | 1.6 | 4.9 | 0.9 | 2.7 |
+| RTX A5000 | 1.8-2.3 | 5.3-6.8 | 1.0 | 3.0 |
+
+Gadget exploitability (NashConv / mass, in pots of the turn root), median over roots: alt 1.5-1.9e-3
+at 100, 6-7e-4 at 300; sim (simultaneous updates: one network pass per iteration) 2.5-2.9e-3 at
+100, 7-8e-4 at 300 (sim needs about 1.5x the iterations for the same gap). 85-90% of the time
+is the network: about 8.1 ms per leaf call of 13 rows on a 2080 Ti (forward alone 5.9 ms;
+torch.compile reduce-overhead 5.2 ms, not adopted), two calls per alternating iteration; the
+tree is about 2.8 ms per iteration on the CPU. GPU memory 62 MB, host RSS 1.6 GB; one-time
+setup about 10 s (game, network, flop strategy), about 0.3 s per root (strategy slice, leaf).
+
 ## Real-deck solves and grades: use 300 iterations and re-solve tolerance 1e-3 (2026-11-18)
 
 `real_trunk.py` now defaults to `--iters 300` and `real_grade.py` to `--tol 1e-3`. Measured on

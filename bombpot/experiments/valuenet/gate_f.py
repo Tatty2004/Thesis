@@ -86,10 +86,22 @@ class LeafCFR(RangeCFR):
     with the trunk's averaging weights (the opponent's constraint values of a safe re-solve,
     as DeepStack keeps them)."""
 
-    def __init__(self, pt, leaf, variant: str = "dcfr", **kw):
+    def __init__(self, pt, leaf, variant: str = "dcfr", turn_cfv: bool = False, **kw):
+        """turn_cfv: also keep each player's values at the roots of the last street (the turn
+        roots), averaged with the same weights (the T values of a safe turn re-solve,
+        experiments/valuenet/turn_resolve.py)."""
         super().__init__(pt, variant, leaf=Recording(leaf), **kw)
         self.river_classes = pt.classes[pt.num_streets]
         self.leaf_cum, self.weight_sum = [None, None], [0.0, 0.0]
+        self.turn_cfv = turn_cfv
+        self.root_cum = [None, None]
+        self._last_values = None
+
+    def values(self, p: int, hsig, reach, mode: str = "cfr"):
+        out = super().values(p, hsig, reach, mode)
+        if mode == "cfr":
+            self._last_values = out[0]
+        return out
 
     def instant_regrets(self, p: int):
         out = super().instant_regrets(p)
@@ -99,7 +111,17 @@ class LeafCFR(RangeCFR):
         self.leaf_cum[p] = [w * x for x in v] if self.leaf_cum[p] is None else [a + w * x for a, x in
                                                                                 zip(self.leaf_cum[p], v)]
         self.weight_sum[p] += w
+        if self.turn_cfv:
+            r = [x[0] for x in self._last_values[self.pt.num_streets - 1]]  # [c] (D, L_c, H) at the class roots
+            self.root_cum[p] = [w * x for x in r] if self.root_cum[p] is None else [a + w * x for a, x in
+                                                                                    zip(self.root_cum[p], r)]
+        self._last_values = None
         return out
+
+    def turn_cfv_average(self, q: int) -> list:
+        """Player q's values at the last street's roots averaged over the iterations, [c]
+        (D, L_c, H), solver units (needs turn_cfv)."""
+        return [x / self.weight_sum[q] for x in self.root_cum[q]]
 
     def cfv_average(self, c: int, q: int) -> np.ndarray:
         """Player q's averaged leaf values at river class c, (D_turn, L_c, H), solver units."""
