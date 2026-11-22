@@ -27,6 +27,6 @@ mkdir -p "$LOCAL" "$KEEP"
 trap 'rm -rf "$NUMBA_CACHE_DIR" "$LOCAL"' EXIT
 rc=0
 $PY -m bombpot.experiments.valuenet.${MODULE:-flop_pilot run} --model "${MODEL:-/n/fs/ugrad/ug27/rb5709/Thesis/results/valuenet/net/sweep_multi_d192L4/best.pt}" $ARGS --out "$LOCAL" || rc=$?
-find "$LOCAL" -maxdepth 1 \( -name '*.json' -o \( -name '*.npz' -size -1M \) \) -exec cp {} "$KEEP"/ \;
+find "$LOCAL" -maxdepth 1 \( -name '*.json' -o \( -name '*.npz' -size -1024k \) \) -exec cp {} "$KEEP"/ \;
 ls -la "$LOCAL"
 exit $rc
