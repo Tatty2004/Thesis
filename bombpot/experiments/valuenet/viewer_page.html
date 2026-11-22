@@ -16,6 +16,7 @@
   --suit-s: #1d2630; --suit-h: #c4302b; --suit-d: #1f63c6; --suit-c: #23864a;
   --act-fold: #5f8bb8; --act-call: #3c9a68; --act-bet1: #e0564e; --act-bet2: #b32a2a; --act-allin: #6e1219;
   --range: #6c7f95; --blocked: #d8dde3; --focus: #2e5d8a; --warn-bg: #fff4e0; --warn-ink: #7a4b00;
+  --live-bg: #e2f0ea; --live-ink: #1e6b47;
   --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
   --font-body: "Archivo", "Helvetica Neue", Arial, sans-serif;
   --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -26,6 +27,7 @@
     --accent: #7fb0e0; --card: #f1f3f5;
     --act-fold: #6f9bcb; --act-call: #4fb37e; --act-bet1: #ec6a61; --act-bet2: #c03636; --act-allin: #7f1a22;
     --range: #8296ad; --blocked: #2a333d; --focus: #7fb0e0; --warn-bg: #3a2c12; --warn-ink: #f2cf8f;
+    --live-bg: #183428; --live-ink: #8fd6b0;
     color-scheme: dark;
   }
 }
@@ -134,6 +136,13 @@ tr.off td { color: var(--muted); }
 .progress { height: 10px; border-radius: 5px; background: var(--sunk); overflow: hidden; margin-top: 8px; }
 .progress span { display: block; height: 100%; background: var(--accent); width: 0; transition: width 300ms ease; }
 .mode { margin-left: auto; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.modes { margin-left: auto; display: flex; flex-wrap: wrap; gap: 12px 18px; justify-content: flex-end; }
+.modes .mode { margin-left: 0; }
+.source { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: var(--sunk); color: var(--muted); }
+.source i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.source.live { background: var(--live-bg); color: var(--live-ink); }
+.source.live i { background: var(--live-ink); }
+.gaps { margin-top: 8px; font-size: 12.5px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
 </style>
 </head>
 <body>
@@ -145,7 +154,10 @@ tr.off td { color: var(--muted); }
 
   <section class="panel">
     <div class="boards"><div class="boards" id="boards"></div>
-      <div class="mode"><div class="label">River solve</div><div class="seg" id="mode-toggle"></div></div></div>
+      <div class="modes">
+        <div class="mode"><div class="label">Turn and river</div><div class="seg" id="live-toggle"></div></div>
+        <div class="mode"><div class="label">River solve</div><div class="seg" id="mode-toggle"></div></div>
+      </div></div>
     <div class="picker" id="picker" hidden style="margin-top:14px"></div>
   </section>
 
@@ -174,8 +186,9 @@ tr.off td { color: var(--muted); }
   <section class="notes">
     <h2>Reading this page</h2>
     <ul>
-      <li>The flop and turn show the solver's stored <strong>average strategy</strong>, one row per individual hand (no buckets).</li>
-      <li>The river is not stored. The first time you reach a river for a given turn and betting line, it is solved on this machine for both players and all river cards at once; after that it is instant.</li>
+      <li><strong>Stored trunk</strong>: the flop and turn show the solver's stored <strong>average strategy</strong>, one row per individual hand (no buckets).</li>
+      <li><strong>Live re-solve</strong>: the flop is still the stored one. When you pick the turn cards, that turn is re-solved on this machine for both players (the safe re-solving gadget, the value network at the end of the turn, the opponent held to the stored solve's values). The river is then re-solved on top of that live turn. Each node says which strategy you are looking at, and each live solve shows its gadget gap (how far it is from solved, in pots; smaller is better).</li>
+      <li>The river is not stored. The first time you reach a river for a given turn and betting line, it is solved on this machine for both players and all river cards at once; after that it is instant. Live results are kept too.</li>
       <li>Betting is no-limit with an ante of 1 and 100 behind: a bet of half the pot or the pot, and one raise per street. Each board is worth half the pot.</li>
       <li>The flops are fixed. Pick the turn and river cards when the betting reaches them.</li>
       <li>Bar height in a cell is the share of that hand class still in the shown player's range; the colors split it by action. Combos sharing a card with a board are left out, and a fully blocked cell is hatched.</li>
@@ -194,7 +207,7 @@ tr.off td { color: var(--muted); }
   const SLOT_NAMES = { tA: "turn A", tB: "turn B", rA: "river A", rB: "river B" };
 
   let meta = null, st = null, cells = null, token = 0;
-  const state = { fa: [], ta: [], ra: [], turn: [null, null], river: [null, null], view: "actor", picker: null, cell: 0, mode: "quick" };
+  const state = { fa: [], ta: [], ra: [], turn: [null, null], river: [null, null], view: "actor", picker: null, cell: 0, mode: "quick", live: false };
 
   function setStatus(text, err) { const s = $("status"); s.textContent = text || ""; s.hidden = !text; s.className = "status" + (err ? " err" : ""); }
   const fmt = (x) => String(+(+x).toFixed(2));
@@ -247,16 +260,18 @@ tr.off td { color: var(--muted); }
     p.set("fa", state.fa.join(","));
     if (turn) { p.set("turn", state.turn[0] + state.turn[1]); p.set("ta", state.ta.join(",")); }
     if (river) { p.set("river", state.river[0] + state.river[1]); p.set("ra", state.ra.join(",")); p.set("mode", state.mode); }
+    if (state.live) p.set("live", "1");
     return p;
   }
 
   async function load() {
     const mine = ++token, p = query();
-    const solving = p.has("river") && state.mode === "exact" && !(st && st.resolve && st.resolve.mode === "exact")
-      && !(st && st.need === "river" && st.solved);
-    const timer = setTimeout(() => { if (solving) showProgress(null); else setStatus("Loading…"); }, solving ? 0 : 400);
+    // A solve may start on this request: an exact river not solved yet, or (live) a turn re-solve.
+    const solving = (p.has("river") && state.mode === "exact" && !(st && st.resolve && st.resolve.mode === "exact" && st.resolve.live === state.live)
+      && !(st && st.need === "river" && st.solved)) || (state.live && p.has("turn"));
+    const timer = setTimeout(() => setStatus("Loading…"), 400);
     const poll = solving ? setInterval(async () => {
-      try { const g = await (await fetch("/api/progress")).json(); if (mine === token && g.active) showProgress(g); } catch (e) { /* keep waiting */ }
+      try { const g = await (await fetch("/api/progress")).json(); if (mine === token && g.active) { clearTimeout(timer); showProgress(g); } } catch (e) { /* keep waiting */ }
     }, 700) : null;
     const stop = () => { clearTimeout(timer); if (poll) clearInterval(poll); };
     try {
@@ -283,8 +298,11 @@ tr.off td { color: var(--muted); }
   function showProgress(g) {
     const el = $("status"); el.hidden = false; el.className = "status";
     const frac = g ? (g.part + g.fraction) / g.parts : 0;
-    el.innerHTML = "<strong>Solving this river exactly</strong> (both players, every river card for this turn and betting line; later visits are instant).<br>"
-      + (g ? g.text + " \u00b7 " + g.seconds.toFixed(0) + " s so far" : "starting…")
+    const head = g && g.kind === "turn"
+      ? "<strong>Re-solving this turn live</strong> (both players, the value network at the end of the turn; later visits are instant)."
+      : "<strong>Solving this river exactly</strong>" + (state.live ? " on top of the live turn re-solve" : "") + " (both players, every river card for this turn and betting line; later visits are instant).";
+    el.innerHTML = head + "<br>"
+      + (g ? g.text + " \u00b7 " + g.seconds.toFixed(1) + " s so far" : "starting…")
       + '<div class="progress"><span style="width:' + (100 * frac).toFixed(1) + '%"></span></div>';
   }
 
@@ -299,6 +317,38 @@ tr.off td { color: var(--muted); }
     }
   }
 
+  function renderLive() {
+    const el = $("live-toggle"); el.innerHTML = "";
+    for (const [v, text, tip] of [[false, "Stored trunk", "The flop and turn from the stored solve; rivers re-solved from it."],
+                                  [true, "Live re-solve", "The flop from the stored solve; the turn re-solved live when its cards are picked (a few seconds), and the river re-solved on top of that live turn."]]) {
+      const b = document.createElement("button"); b.textContent = text; b.title = tip;
+      b.setAttribute("aria-pressed", String(state.live === v));
+      b.addEventListener("click", () => { if (state.live === v) return; state.live = v; renderLive(); load(); });
+      el.appendChild(b);
+    }
+  }
+
+  // Where the shown strategy comes from, and how well each live solve converged.
+  function sourceHtml() {
+    const src = st.source;
+    if (!src) return "";
+    const live = src.kind.startsWith("live");
+    let html = '<div style="margin-top:8px"><span class="source' + (live ? " live" : "") + '"><i></i>' + src.label + "</span></div>";
+    const lines = [];
+    const turn = src.kind === "live_turn" ? src : (src.turn && src.turn.kind === "live_turn" ? src.turn : null);
+    const g = (x) => (+x).toExponential(1);
+    if (turn) lines.push("Live turn re-solve: gadget gap P0 " + g(turn.gap_pots[0]) + " / P1 " + g(turn.gap_pots[1]) + " pots, "
+      + turn.kept.map((x) => Math.round(x)).join(" / ") + " iterations kept of " + Math.round(turn.iterations[0]) + ", "
+      + (turn.seconds[0] + turn.seconds[1]).toFixed(1) + " s, T values '" + turn.cfv + "'");
+    if (st.resolve && src.street === 2) {
+      const r = st.resolve;
+      lines.push((live ? "Live river" : "River") + " " + (r.mode === "quick" ? "quick solve (no gadget)" : "re-solve") + ": gap P0 " + g(r.gap_pots[0]) + " / P1 " + g(r.gap_pots[1])
+        + " pots, " + r.iterations.map((x) => Math.round(x)).join(" / ") + " iterations, " + (r.seconds[0] + r.seconds[1]).toFixed(1) + " s");
+    }
+    if (lines.length) html += '<div class="gaps data">' + lines.map((x) => "<span>" + x + "</span>").join("") + "</div>";
+    return html;
+  }
+
   // Rendering --------------------------------------------------------------------------------
 
   function renderChips() {
@@ -308,7 +358,7 @@ tr.off td { color: var(--muted); }
     add(meta.iterations + " iterations");
     if (meta.flop_turn_exploitability !== null) add("vs network " + meta.flop_turn_exploitability.toFixed(4));
     if (meta.grade) add("exact exploitability " + meta.grade.exploitability.toFixed(4));
-    add("river solved on " + meta.device, "warn");
+    add("re-solves on " + meta.device, "warn");
   }
 
   function streetNow() { return st.street !== undefined ? st.street : (st.path.length ? st.path[st.path.length - 1].street : 0); }
@@ -353,8 +403,8 @@ tr.off td { color: var(--muted); }
     const slot = state.picker, used = usedExcept(slot);
     p.innerHTML = '<div class="picker-head"><span><strong>Pick ' + SLOT_NAMES[slot] + '</strong> <span style="color:var(--muted)">· cards on a board or already picked are disabled</span></span></div>';
     const grid = document.createElement("div"); grid.className = "picker-grid";
-    for (const suit of ["s", "h", "d", "c"]) {
-      for (let r = 12; r >= 0; r--) {
+    for (const suit of ["s", "h", "d", "c"].filter((x) => !meta.suits || meta.suits.includes(x))) {
+      for (let r = (meta.ranks || RANKS).length - 1; r >= 0; r--) {
         const s = RANKS[r] + suit;
         const b = document.createElement("button");
         b.className = "pick s-" + suit;
@@ -491,18 +541,19 @@ tr.off td { color: var(--muted); }
     const pot = st.pot !== undefined ? "pot " + fmt(st.pot) : "";
     if (st.terminal) {
       el.innerHTML = '<div class="node-head"><h2>Hand over</h2><span class="data">' + pot + '</span></div><p style="margin:8px 0 0">' + st.terminal
-        + '. Go back with the action path, or start again.</p><div class="stats"><span>P' + player + ' range: <span class="data">' + g.inRange.toFixed(1) + "</span> of " + g.combos + " combos</span></div>";
+        + '. Go back with the action path, or start again.</p><div class="stats"><span>P' + player + ' range: <span class="data">' + g.inRange.toFixed(1) + "</span> of " + g.combos + " combos</span></div>" + sourceHtml();
       return;
     }
     if (st.need) {
       el.innerHTML = '<div class="node-head"><h2>' + STREETS[t] + ' · P0 to act</h2><span class="data">' + pot + '</span></div><div class="notice">Pick the ' + st.need
         + " card for each board to see the " + STREETS[t].toLowerCase() + " strategy."
-        + (st.need === "river" ? (st.solved ? " This river spot is already solved, so it will be instant." : " This river spot has not been solved yet: picking the cards starts the solve.") : "") + "</div>"
-        + '<div class="stats"><span>P' + player + ' range: <span class="data">' + g.inRange.toFixed(1) + "</span> of " + g.combos + " combos</span></div>";
+        + (st.need === "river" ? (st.solved ? " This river spot is already solved, so it will be instant." : " This river spot has not been solved yet: picking the cards starts the solve.") : "")
+        + (st.need === "turn" && state.live ? " The turn is then re-solved live (a few seconds the first time)." : "") + "</div>"
+        + '<div class="stats"><span>P' + player + ' range: <span class="data">' + g.inRange.toFixed(1) + "</span> of " + g.combos + " combos</span></div>" + sourceHtml();
       return;
     }
     const owe = Math.max(st.added[0], st.added[1]) - st.added[actor];
-    el.innerHTML = '<div class="node-head"><h2>' + STREETS[t] + " · P" + actor + ' to act</h2><span class="data">' + pot + (owe > 0 ? " · to call " + fmt(owe) : "") + "</span></div>";
+    el.innerHTML = '<div class="node-head"><h2>' + STREETS[t] + " · P" + actor + ' to act</h2><span class="data">' + pot + (owe > 0 ? " · to call " + fmt(owe) : "") + "</span></div>" + sourceHtml();
     const acts = document.createElement("div"); acts.className = "actions";
     st.actions.forEach((l, a) => {
       const b = document.createElement("button"); b.className = "act"; b.style.setProperty("--c", cols[a]);
@@ -516,8 +567,6 @@ tr.off td { color: var(--muted); }
     el.appendChild(bar);
     const stats = document.createElement("div"); stats.className = "stats";
     let html = "<span>P" + actor + ' range: <span class="data">' + summary.inRange.toFixed(1) + "</span> of " + summary.combos + " combos</span><span>frequencies weighted by P" + actor + "'s range</span>";
-    if (st.resolve) html += "<span>" + st.resolve.mode + ' river solve: <span class="data">' + st.resolve.iterations.map((x) => Math.round(x)).join(" / ") + "</span> iterations, <span class=\"data\">"
-      + (st.resolve.seconds[0] + st.resolve.seconds[1]).toFixed(0) + " s</span></span>";
     stats.innerHTML = html;
     el.appendChild(stats);
   }
@@ -548,7 +597,7 @@ tr.off td { color: var(--muted); }
   (async function start() {
     try {
       meta = await (await fetch("/api/meta")).json();
-      build(); renderChips(); renderMode();
+      build(); renderChips(); renderLive(); renderMode();
       load();
     } catch (e) { setStatus("Couldn't reach the viewer server: " + (e.message || e), true); }
   })();

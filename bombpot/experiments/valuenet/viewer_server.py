@@ -1,13 +1,25 @@
-"""A local strategy viewer for a real-deck value-net solve (real_trunk's output directory).
+"""A local strategy viewer for a real-deck value-net solve (real_trunk's output directory, or
+viewer_pack's copy of it).
 
     python -m bombpot.experiments.valuenet.viewer_server --trunk <dir> [--device mps|cuda|cpu]
+        [--model net.pt] [--live-iters 300] [--cache <dir>]
 
-then open http://localhost:8765. The flop and the turn are read from the stored strategy
-(strategy.npz). A river is not stored: the first visit to a (turn deal, river line) re-solves it
-for both players exactly as the grade does (real_grade.resolve_deal: the safe re-solve gadget
-from the player's reach under the stored strategy, the opponent held to its averaged leaf values,
-leafcfv.npy), over all 1,892 river deals at once; the result is kept in <trunk>/river_cache so a
-second visit is instant.
+then open http://localhost:8765. Two sources for the turn and the river, picked in the page:
+
+Stored trunk. The flop and the turn are read from the stored strategy (strategy.npz). A river is
+not stored: the first visit to a (turn deal, river line) re-solves it for both players exactly
+as the grade does (real_grade.resolve_deal: the safe re-solve gadget from the player's reach
+under the stored strategy, the opponent held to its averaged leaf values, leafcfv.npy), over all
+1,892 river deals at once ("exact"), or just the picked river from both ranges without a gadget
+("quick", not the graded strategy). Results are kept in <cache>/river_cache.
+
+Live re-solve (live.py). The flop is still the stored trunk's (a live flop needs a flop-end
+network: live.LiveSolver.flop_strategy is the hook). Picking the turn cards re-solves that turn
+for both players with the safe gadget, the network at every turn end, T values from the trunk
+(turncfv.npy if there, else backed up from leafcfv.npy); the river is then re-solved on top of
+the live turn: each player's reach under its re-solved turn, the opponent held to the values it
+got in that turn re-solve. River "exact" and "quick" work as above. Results are kept in
+<cache>/live_cache/<tag>/ (the tag names the T-value source, iterations and the network).
 
 Listens on localhost only. Needs torch.
 """
@@ -32,12 +44,12 @@ RANKS, SUITS = "23456789TJQKA", "cdhs"
 TOKEN = re.compile(r"r[\d.]+|c|f|a")
 
 
-def card_str(c: int) -> str:
-    return RANKS[c // 4] + SUITS[c % 4]
+def card_str(c: int, ns: int = 4) -> str:
+    return RANKS[c // ns] + SUITS[c % ns]
 
 
-def parse_card(s: str) -> int:
-    return RANKS.index(s[0]) * 4 + SUITS.index(s[1])
+def parse_card(s: str, ns: int = 4) -> int:
+    return RANKS.index(s[0]) * ns + SUITS.index(s[1])
 
 
 def npz_memmaps(path: Path) -> dict:
@@ -89,9 +101,17 @@ def label(a: str, hist: str, contrib: float, stack: float) -> str:
 
 
 class Viewer:
-    def __init__(self, trunk: Path, device: str, tol: float, iters: int, keep: int = 6):
+    """live: LiveSolver keyword arguments (model, cfv, iters, check_every, simultaneous,
+    keep_best); the solver is made on the first live request. cache: where solved rivers and
+    live results are kept (default: the trunk directory)."""
+
+    def __init__(self, trunk: Path, device: str, tol: float, iters: int, keep: int = 6, live: dict | None = None,
+                 cache: Path | None = None):
+        trunk = Path(trunk)
         self.trunk, self.device, self.tol, self.iters, self.keep = trunk, device, tol, iters, keep
+        self.cache_dir = Path(cache) if cache is not None else trunk
         self.info = json.loads((trunk / "trunk.json").read_text())
+        self.ns = int(self.info["args"]["deck"].split(",")[1])
         self.game, self.upper, self.river = rg.build(trunk)
         up = self.upper
         self.hands = np.array(up.hands)  # (H, 2) cards
@@ -99,7 +119,7 @@ class Viewer:
         self.sigma = npz_memmaps(trunk / "strategy.npz")
         cfv = trunk / "leafcfv32.npy"
         self.cfv = np.load(cfv if cfv.exists() else trunk / "leafcfv.npy", mmap_mode="r")
-        self.flops = [[parse_card(f[i:i + 2]) for i in (0, 2, 4)] for f in self.info["args"]["flops"].split(",")]
+        self.flops = [[parse_card(f[i:i + 2], self.ns) for i in (0, 2, 4)] for f in self.info["args"]["flops"].split(",")]
         self.turn_of = {(int(a), int(b)): d for d, (a, b) in enumerate(self.river.turn_cards)}
         # (turn line, close) -> (river class, line in class, index among all river lines)
         self.river_of, i = {}, 0
@@ -113,7 +133,9 @@ class Viewer:
         self.progress = {"active": False}
         self.lock = threading.Lock()   # exact re-solves
         self.qlock = threading.Lock()  # quick solves: never wait behind an exact one
-        (trunk / "river_cache").mkdir(exist_ok=True)
+        self.llock = threading.Lock()  # live turn re-solves
+        self.live_args, self._live, self.live_turns = dict(live or {}), None, {}
+        (self.cache_dir / "river_cache").mkdir(parents=True, exist_ok=True)
         grade = trunk / "grade.json"
         self.grade = json.loads(grade.read_text()) if grade.exists() else None
 
@@ -124,8 +146,70 @@ class Viewer:
         x = np.asarray(self.sigma[f"t{t}_c0_k{k}"][d, l], dtype=np.float64)
         return x / x.sum(-1, keepdims=True)
 
+    def flop_row(self, k: int) -> np.ndarray:
+        """(H, A) the flop strategy at node k: always the stored trunk's (live.LiveSolver.flop_strategy
+        is where a live flop solve would come in)."""
+        return self.row(0, k, 0, 0)
+
     def possible(self, public) -> np.ndarray:
         return ~np.isin(self.hands, list(public)).any(axis=1)
+
+    # Live re-solves ------------------------------------------------------------------------
+
+    @property
+    def live(self):
+        if self._live is None:
+            from bombpot.experiments.valuenet.live import LiveSolver
+
+            with self.llock:
+                if self._live is None:
+                    self._live = LiveSolver(self.trunk, self.device, built=(self.game, self.upper, self.river),
+                                            **self.live_args)
+        return self._live
+
+    def live_dir(self) -> Path:
+        out = self.cache_dir / "live_cache" / self.live.tag
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+
+    def live_turn_path(self, d: int, l1: int) -> Path:
+        return self.live_dir() / f"turn_d{d:04d}_l{l1:02d}.npz"
+
+    def live_turn(self, d: int, l1: int) -> dict:
+        """Both players' live re-solves of turn deal d after flop close l1 (live.LiveSolver.turn),
+        cached in memory and on disk."""
+        live = self.live
+        key = (d, l1)
+        with self.llock:
+            if key in self.live_turns:
+                return self.live_turns[key]
+            path = self.live_turn_path(d, l1)
+            if path.exists():
+                with np.load(path) as f:
+                    out = {k: f[k] for k in f.files}
+            else:
+                t0 = time.perf_counter()
+                its = live.iters
+
+                def progress(p, t, e):
+                    pot = 2.0 * float(self.upper.classes[1][0].contrib[l1])
+                    self.progress = {"active": True, "kind": "turn", "part": p, "parts": 2, "fraction": t / its,
+                                     "iterations": t, "seconds": time.perf_counter() - t0,
+                                     "text": f"P{p}'s turn re-solve: iteration {t} of {its}, gadget gap {e / pot:.2g} pots"}
+
+                self.progress = {"active": True, "kind": "turn", "part": 0, "parts": 2, "fraction": 0.0, "iterations": 0,
+                                 "seconds": 0.0, "text": "setting up the turn re-solve (network, T values)"}
+                try:
+                    out = live.turn(d, 0, l1, progress)
+                finally:
+                    self.progress = {"active": False}
+                tmp = path.with_suffix(".tmp.npz")
+                np.savez(tmp, **out)
+                tmp.replace(path)
+            self.live_turns[key] = out
+            while len(self.live_turns) > 50:
+                self.live_turns.pop(next(iter(self.live_turns)))
+            return out
 
     # The river -----------------------------------------------------------------------------
 
@@ -134,19 +218,27 @@ class Viewer:
         i, j = rem.index(ra), rem.index(rb)
         return i * (self.river.left - 1) + j - (j > i)
 
-    def solve_river(self, d: int, c: int, l: int, i: int, reach) -> dict:
+    def river_path(self, d: int, i: int, live: bool) -> Path:
+        if live:
+            return self.live_dir() / f"river_d{d:04d}_l{i:03d}_tol{self.tol:g}.npz"
+        return self.cache_dir / "river_cache" / f"d{d:04d}_l{i:03d}.npz"
+
+    def solve_river(self, d: int, c: int, l: int, i: int, reach, cfv=None) -> dict:
         """Both players' re-solves of river line i of turn deal d: {"k<node>": (R, H, A) float16
-        for the node's acting player, "stats": (2, 3) iterations, gap / mass, seconds}."""
-        key = (d, i)
+        for the node's acting player, "stats": (2, 3) iterations, gap / mass, seconds}.
+        cfv (2, H): the opponents' T values (live: from the live turn re-solve; default the
+        trunk's averaged leaf values)."""
+        live = cfv is not None
+        key = (d, i, live)
         with self.lock:
             if key in self.cache:
                 return self.cache[key]
-            path = self.trunk / "river_cache" / f"d{d:04d}_l{i:03d}.npz"
+            path = self.river_path(d, i, live)
             if path.exists():
                 with np.load(path) as f:
                     out = {k: f[k] for k in f.files}
             else:
-                out = self._solve(d, c, l, i, reach)
+                out = self._solve(d, c, l, i, reach, cfv)
                 tmp = path.with_suffix(".tmp.npz")
                 np.savez(tmp, **out)
                 tmp.replace(path)
@@ -155,7 +247,7 @@ class Viewer:
                 self.cache.pop(next(iter(self.cache)))
             return out
 
-    def _solve(self, d: int, c: int, l: int, i: int, reach) -> dict:
+    def _solve(self, d: int, c: int, l: int, i: int, reach, cfv=None) -> dict:
         import torch
 
         from bombpot.valuenet.gpu_subgame import GpuGadget, StreetSums
@@ -173,15 +265,16 @@ class Viewer:
         tp, contrib = line_template(rc.template, l), float(rc.contrib[l])
         out, stats = {}, np.zeros((2, 3))
         t0 = time.perf_counter()
-        self.progress = {"active": True, "part": 0, "parts": 2, "fraction": 0.0, "iterations": 0, "seconds": 0.0,
-                         "text": "building the river's card tables"}
+        self.progress = {"active": True, "kind": "river", "part": 0, "parts": 2, "fraction": 0.0, "iterations": 0,
+                         "seconds": 0.0, "text": "building the river's card tables"}
         for p in (0, 1):
             o = 1 - p
             rp = np.where(valid, reach[p], 0.0)
             m = float(rp.sum())
             if m <= 0:
                 continue
-            g = GpuGadget(sums, tp, contrib, rp / m, np.where(valid, self.cfv[o, d, i], 0.0) / (kt * m), p,
+            co = self.cfv[o, d, i] if cfv is None else cfv[o]
+            g = GpuGadget(sums, tp, contrib, rp / m, np.where(valid, co, 0.0) / (kt * m), p,
                           dtype=torch.float32, device=self.device)
             ev = self._run(g, 2.0 * self.tol * 2.0 * contrib, p, 2, t0)
             stats[p] = (ev["iterations"], ev["exploitability"], g.seconds)
@@ -201,7 +294,7 @@ class Viewer:
         while g.t < self.iters:
             for _ in range(5):  # the grade's check every 10 iterations, reported every 2
                 g.iterate(2)
-                self.progress = {"active": True, "part": part, "parts": parts,
+                self.progress = {"active": True, "kind": "river", "part": part, "parts": parts,
                                  "fraction": float(frac if first is not None else 0.04 * g.t),
                                  "iterations": g.t, "seconds": time.perf_counter() - t0,
                                  "text": f"P{part}'s solve: iteration {g.t}"}
@@ -210,7 +303,7 @@ class Viewer:
             first = gap if first is None else first
             frac = 1.0 if gap <= tol else (0.0 if first <= tol else
                                            min(1.0, max(0.0, np.log(first / gap) / np.log(first / tol))))
-            self.progress = {"active": True, "part": part, "parts": parts, "fraction": float(frac),
+            self.progress = {"active": True, "kind": "river", "part": part, "parts": parts, "fraction": float(frac),
                              "iterations": g.t, "seconds": time.perf_counter() - t0,
                              "text": f"P{part}'s solve: iteration {g.t}, gap {gap:.3g} chips, target {tol:.3g}"}
             if gap <= tol:
@@ -218,14 +311,15 @@ class Viewer:
         ev["iterations"] = g.t
         return ev
 
-    def solve_quick(self, d: int, c: int, l: int, i: int, r: int, reach) -> dict:
+    def solve_quick(self, d: int, c: int, l: int, i: int, r: int, reach, live: bool = False) -> dict:
         """One river deal alone, solved from both players' ranges (no gadget, so without the
-        re-solve's guarantee; not what the grade measures). {"k<node>": (1, H, A)} and stats."""
+        re-solve's guarantee; not what the grade measures). {"k<node>": (1, H, A)} and stats.
+        live: the ranges come from the live turn re-solve (a separate cache entry)."""
         import torch
 
         from bombpot.valuenet.gpu_subgame import GpuSubgame
 
-        key = (d, i, r)
+        key = (d, i, r, live)
         with self.qlock:
             if key in self.quick:
                 return self.quick[key]
@@ -253,8 +347,12 @@ class Viewer:
 
     def state(self, q: dict) -> dict:
         """The node reached by q: flop actions `fa`, turn cards `turn`, turn actions `ta`, river
-        cards `river`, river actions `ra` (actions as indices, cards as 'AsKd' = board A then B)."""
+        cards `river`, river actions `ra` (actions as indices, cards as 'AsKd' = board A then B),
+        `mode` exact | quick (the river), `live` 1 (the turn and river re-solved live). Every
+        node says where its strategy comes from (`source`) and, live, the gadget gaps."""
         up = self.upper
+        live = q.get("live") in ("1", "true")
+        cs = lambda x: card_str(x, self.ns)
         acts = lambda s: [int(x) for x in s.split(",") if x != ""]
         fa, ta, ra = acts(q.get("fa", "")), acts(q.get("ta", "")), acts(q.get("ra", ""))
         reach = [np.ones(self.H), np.ones(self.H)]
@@ -265,7 +363,7 @@ class Viewer:
 
         def done(**kw):
             ok = self.possible(public)
-            out.update(boards=[[card_str(x) for x in b] for b in boards],
+            out.update(boards=[[cs(x) for x in b] for b in boards],
                        reach=[np.round(np.where(ok, r, 0.0), 5).tolist() for r in reach],
                        possible=ok.astype(int).tolist(), **kw)
             return out
@@ -295,9 +393,10 @@ class Viewer:
         # Flop
         lc = up.classes[0][0]
         tp, contrib, stack = lc.template, float(lc.contrib[0]), float(lc.stack[0])
-        kind, x, hist = walk(0, tp, contrib, stack, fa, lambda k: self.row(0, k, 0, 0))
+        trunk_src = {"kind": "trunk", "label": "stored trunk", "street": 0}
+        kind, x, hist = walk(0, tp, contrib, stack, fa, self.flop_row)
         if kind == "node":
-            return node(0, tp, x, contrib, stack, lambda k: self.row(0, k, 0, 0))
+            return node(0, tp, x, contrib, stack, self.flop_row, {"source": trunk_src})
         if kind == "fold":
             return done(terminal=f"P{x} folds", pot=2 * contrib + sum(chips(hist, contrib, stack)))
         # Turn
@@ -306,38 +405,53 @@ class Viewer:
         tp, contrib, stack = lc.template, float(lc.contrib[l1]), float(lc.stack[l1])
         if not q.get("turn"):
             return done(need="turn", pot=2 * contrib, street=1)
-        ca, cb = parse_card(q["turn"][:2]), parse_card(q["turn"][2:4])
+        ca, cb = parse_card(q["turn"][:2], self.ns), parse_card(q["turn"][2:4], self.ns)
         if (ca, cb) not in self.turn_of:
             raise ValueError("those turn cards are not available")
         d = self.turn_of[(ca, cb)]
         boards[0].append(ca), boards[1].append(cb)
         public |= {ca, cb}
-        strat = lambda k: self.row(1, k, d, l1)
+        t0 = time.perf_counter()
+        if live:
+            lt = self.live_turn(d, l1)
+            ls = lt["stats"]
+            turn_src = {"kind": "live_turn", "label": "live turn re-solve", "street": 1,
+                        "cfv": self.live.cfv, "iterations": ls[:, 0].tolist(), "kept": ls[:, 1].tolist(),
+                        "gap_chips": ls[:, 2].tolist(), "gap_pots": ls[:, 3].tolist(), "seconds": ls[:, 4].tolist(),
+                        "waited": time.perf_counter() - t0}
+
+            def strat(k):
+                return lt[f"p{tp.players[k]}_k{k}"].astype(np.float64)
+        else:
+            lt, turn_src = None, {"kind": "trunk", "label": "stored trunk", "street": 1}
+            strat = lambda k: self.row(1, k, d, l1)
         kind, x, hist = walk(1, tp, contrib, stack, ta, strat)
         if kind == "node":
-            return node(1, tp, x, contrib, stack, strat)
+            return node(1, tp, x, contrib, stack, strat, {"source": turn_src})
         if kind == "fold":
             return done(terminal=f"P{x} folds", pot=2 * contrib + sum(chips(hist, contrib, stack)))
         # River
         if (l1, x) not in self.river_of:
             return done(terminal="All in: the river is dealt and the hands are shown", pot=2 * contrib + sum(chips(hist, contrib, stack)))
-        c, l2, i = self.river_of[(l1, x)]
+        close = x  # the turn close this river line continues
+        c, l2, i = self.river_of[(l1, close)]
         rc = up.classes[2][c]
         tp, contrib, stack = rc.template, float(rc.contrib[l2]), float(rc.stack[l2])
         if not q.get("river"):
-            return done(need="river", pot=2 * contrib, street=2,
-                        solved=(d, i) in self.cache or (self.trunk / "river_cache" / f"d{d:04d}_l{i:03d}.npz").exists())
-        ra_, rb_ = parse_card(q["river"][:2]), parse_card(q["river"][2:4])
+            return done(need="river", pot=2 * contrib, street=2, source=turn_src,
+                        solved=(d, i, live) in self.cache or self.river_path(d, i, live).exists())
+        ra_, rb_ = parse_card(q["river"][:2], self.ns), parse_card(q["river"][2:4], self.ns)
         if ra_ == rb_ or {ra_, rb_} & public:
             raise ValueError("those river cards are not available")
         t0 = time.perf_counter()
         r = self.river_child(d, ra_, rb_)
         quick = q.get("mode") == "quick"
         if quick:
-            sol = self.solve_quick(d, c, l2, i, r, [x.copy() for x in reach])
+            sol = self.solve_quick(d, c, l2, i, r, [x.copy() for x in reach], live)
             r = 0
         else:
-            sol = self.solve_river(d, c, l2, i, [x.copy() for x in reach])
+            cfv = self.live.river_inputs(lt, close) if live else None
+            sol = self.solve_river(d, c, l2, i, [x.copy() for x in reach], cfv)
         boards[0].append(ra_), boards[1].append(rb_)
         public |= {ra_, rb_}
 
@@ -347,9 +461,14 @@ class Viewer:
             x = sol[f"k{k}"][r].astype(np.float64)
             return x / np.maximum(x.sum(-1, keepdims=True), 1e-30)
 
+        pot0 = 2 * contrib
         extra = {"resolve": {"iterations": sol["stats"][:, 0].tolist(), "gap": sol["stats"][:, 1].tolist(),
+                             "gap_pots": (sol["stats"][:, 1] / pot0).tolist(),
                              "seconds": sol["stats"][:, 2].tolist(), "waited": time.perf_counter() - t0,
-                             "mode": "quick" if quick else "exact"}}
+                             "mode": "quick" if quick else "exact", "live": live}}
+        src_label = ("live river re-solve" if live else "river re-solve") + (" (quick, this river only)" if quick else "")
+        extra["source"] = {"kind": ("live_river" if live else "river") + ("_quick" if quick else ""), "label": src_label,
+                           "street": 2, "turn": turn_src}
         kind, x, hist = walk(2, tp, contrib, stack, ra, strat)
         if kind == "node":
             return node(2, tp, x, contrib, stack, strat, extra)
@@ -359,14 +478,17 @@ class Viewer:
     def meta(self) -> dict:
         checks = self.info.get("checks", {})
         last = checks[max(checks, key=int)] if checks else None
-        return {"flops": [[card_str(c) for c in f] for f in self.flops],
-                "hands": [[card_str(a), card_str(b)] for a, b in self.hands],
+        return {"flops": [[card_str(c, self.ns) for c in f] for f in self.flops],
+                "hands": [[card_str(a, self.ns), card_str(b, self.ns)] for a, b in self.hands],
+                "ranks": RANKS[:int(self.info["args"]["deck"].split(",")[0])], "suits": SUITS[:self.ns],
+                "live": self.live.describe() if self._live is not None else dict(self.live_args, ready=False),
                 "trunk": self.trunk.name, "iterations": self.info["args"]["iters"],
                 "flop_turn_exploitability": last["flop_turn"]["exploitability"] if last else None,
                 "grade": self.grade, "device": self.device, "tol": self.tol}
 
 
-def serve(viewer: Viewer, port: int) -> None:
+def make_server(viewer: Viewer, port: int, host: str = "127.0.0.1") -> ThreadingHTTPServer:
+    """The HTTP server (not started; serve_forever() runs it). port 0: any free port."""
     page = (Path(__file__).parent / "viewer_page.html").read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
@@ -397,8 +519,13 @@ def serve(viewer: Viewer, port: int) -> None:
         def log_message(self, *a):
             pass
 
-    print(f"viewer at http://localhost:{port}  (Ctrl-C to stop)", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+def serve(viewer: Viewer, port: int) -> None:
+    server = make_server(viewer, port)
+    print(f"viewer at http://localhost:{server.server_address[1]}  (Ctrl-C to stop)", flush=True)
+    server.serve_forever()
 
 
 def main(argv=None):
@@ -408,13 +535,35 @@ def main(argv=None):
     ap.add_argument("--tol", type=float, default=1e-2, help="re-solve tolerance, pots (the grade's)")
     ap.add_argument("--sub-iters", type=int, default=5000)
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--cache", help="where solved rivers and live results are kept (default: the trunk directory)")
+    ap.add_argument("--model", help="the value network for live re-solves (default: net.pt in the trunk "
+                                    "directory, as viewer_pack copies it, else trunk.json's)")
+    ap.add_argument("--live-cfv", default="auto", choices=["auto", "avg", "backup", "onpolicy", "br"],
+                    help="T values of the live turn re-solve (turn_resolve --cfv; auto: avg with turncfv.npy, "
+                         "else backup)")
+    ap.add_argument("--live-iters", type=int, default=300, help="live turn re-solve iterations")
+    ap.add_argument("--live-check-every", type=int, default=20)
+    ap.add_argument("--live-simultaneous", action="store_true",
+                    help="simultaneous updates in the live turn re-solve (one network pass per iteration)")
+    ap.add_argument("--live-last", action="store_true",
+                    help="keep the last iterate's average instead of the check with the smallest gap")
+    ap.add_argument("--live-unpaired", action="store_true",
+                    help="run the two players' turn re-solves one after the other instead of sharing network calls")
+    ap.add_argument("--warm", action="store_true", help="load the network and warm up the live solver at start")
     a = ap.parse_args(argv)
     if a.device is None:
         import torch
         a.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    trunk = Path(a.trunk)
+    model = a.model or (str(trunk / "net.pt") if (trunk / "net.pt").exists() else None)
+    live = {"model": model, "cfv": a.live_cfv, "iters": a.live_iters, "check_every": a.live_check_every,
+            "simultaneous": a.live_simultaneous, "keep_best": not a.live_last, "paired": not a.live_unpaired}
     t0 = time.perf_counter()
-    viewer = Viewer(Path(a.trunk), a.device, a.tol, a.sub_iters)
-    print(f"loaded {a.trunk} in {time.perf_counter() - t0:.0f}s; river re-solves on {a.device}", flush=True)
+    viewer = Viewer(trunk, a.device, a.tol, a.sub_iters, live=live, cache=a.cache)
+    print(f"loaded {a.trunk} in {time.perf_counter() - t0:.0f}s; re-solves on {a.device}", flush=True)
+    if a.warm:
+        t0 = time.perf_counter()
+        print(f"live solver ready in {time.perf_counter() - t0:.0f}s: {viewer.live.describe()}", flush=True)
     serve(viewer, a.port)
 
 
