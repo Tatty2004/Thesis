@@ -83,6 +83,7 @@ bombpot/
                  vectors; `leaf=` takes turn-end values from a provider), sampled_cfr.py (public chance
                  sampling for a last street too big to enumerate, with an exact streamed evaluator),
                  subgame.py (one last-street subgame from root ranges), resolve.py (safe re-solving),
+                 leaf_resolve.py (the safe re-solving gadget on a street valued by a leaf: the turn),
                  lp.py (sequence-form LP, best response as an LP)
     eval/        best_response.py, exploitability.py, audit.py (dominated actions)
     abstraction/ features.py, bucketing.py, abstract_game.py, river.py (river infosets that forget the

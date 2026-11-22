@@ -311,3 +311,58 @@ def test_simultaneous_gadget():
         np.testing.assert_array_equal(x, y)
     late = a.solve(80)["gap"][0].sum()
     assert late < 0.5 * early
+
+
+# The real-deck path end to end, on the small deck: real_trunk --turn-cfv, then the CLI ----------
+
+
+def test_trunk_to_cli_small_deck(tmp_path, capsys):
+    torch = pytest.importorskip("torch")
+    from bombpot.experiments.valuenet import real_trunk
+    from bombpot.valuenet.features import FeatureConfig
+    from bombpot.valuenet.model import HandSetNet, ModelConfig, save_model
+
+    torch.manual_seed(0)
+    model = HandSetNet(FeatureConfig("hand_set", 36, num_ranks=5, num_suits=3),
+                       ModelConfig(kind="set", depth=1, width=8, heads=0))
+    save_model(tmp_path / "net.pt", model)
+    out = tmp_path / "trunk" / "run"
+    real_trunk.main(["--model", str(tmp_path / "net.pt"), "--flops", "2c3c4d,5c6d4c", "--deck", "5,3", "--iters", "2",
+                     "--checks", "2", "--samples", "0", "--defer", "--device", "cpu", "--turn-cfv",
+                     "--no-river-inputs", "--out", str(out)])
+    assert not (out / "roots.npy").exists() and not (out / "leafcfv.npy").exists()
+    cfv = np.load(out / "turncfv.npy")
+    game, _, upper, river = built("pot", full=False)
+    assert cfv.shape == (2, upper.streets[1].num_deals, upper.classes[1][0].num_lines, len(upper.hands))
+    spot = tr.Spot(out, "cpu")
+    c, l = tr.find_line(spot.upper, "r0.5c")
+    d = tr.find_deal(spot.river, tr.cards_of("5h2h", 3))
+    # the turn-root reach from the stored flop strategy is forward's on the stored strategy
+    from bombpot.experiments.valuenet import real_grade as rg
+    avg = rg.load_strategy(out / "strategy.npz", spot.upper)
+    reach = forward(spot.upper, avg)
+    for q in (0, 1):
+        np.testing.assert_array_equal(spot.roots[c][q, l], reach[1][c][0][q][d, l])
+    s_avg = spot.setup(d, c, l, "avg")
+    np.testing.assert_array_equal(s_avg["cfv"][:, 0, 0], cfv[:, d, l])
+    s_br = spot.setup(d, c, l, "br")
+    full_bp = tr.blueprint_values(spot.turn, spot.upper.classes[1], avg[1], [r[0] for r in reach[1]],
+                                  net_leaf_all(spot))
+    for q in (0, 1):
+        np.testing.assert_allclose(s_br["cfv"][q, 0, 0], full_bp["br"][q][c][d, l], rtol=1e-10, atol=1e-14)
+    tr.main(["--trunk", str(out), "--flop-line", "r0.5c", "--turn", "5h2h", "--iters", "5", "--device", "cpu",
+             "--out", str(tmp_path / "spot.npz")])
+    text = capsys.readouterr().out
+    assert "turn re-solve: flop line 'r0.5c'" in text and "T values 'avg'" in text
+    with np.load(tmp_path / "spot.npz") as f:
+        st = f["strategy"]
+        assert st.shape == (len(upper.hands), 3) and np.allclose(st.sum(-1), 1.0)
+
+
+def net_leaf_all(spot):
+    """The trunk's NetLeaf over every turn deal (real_trunk's construction)."""
+    from bombpot.valuenet.leaf import NetLeaf
+
+    eq = np.stack([spot.deal_equity(d) for d in range(spot.D)])
+    return NetLeaf(spot.model, eq, spot.pots, [dg.STACK - p / 2 for p in spot.pots], spot.turn.kappa, "cpu",
+                   boards_by_deal=spot.boards, possible_by_deal=spot.turn.valid, hands=spot.hands)
