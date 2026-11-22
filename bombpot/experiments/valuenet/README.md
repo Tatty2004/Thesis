@@ -27,6 +27,35 @@ torch.compile reduce-overhead 5.2 ms, not adopted), two calls per alternating it
 tree is about 2.8 ms per iteration on the CPU. GPU memory 62 MB, host RSS 1.6 GB; one-time
 setup about 10 s (game, network, flop strategy), about 0.3 s per root (strategy slice, leaf).
 
+## Live re-solving in the viewer; turn T values without turncfv.npy (2026-11-22, branch vn-live)
+
+The strategy viewer has a live mode (`live.py`, `VIEWER.md`): the stored flop, the turn
+re-solved live for both players when its cards are picked, the river re-solved on top of it
+(each player's reach under its own re-solved turn, the opponent's T values from that turn
+re-solve's averaged network values: `LeafGadget.leaf_average`). Tests: `tests/valuenet/test_live.py`
+(the chain equals `turn_resolve` + `gpu_subgame.resolve_gpu` on the small deck, and the server's
+endpoints).
+
+T values without a `--turn-cfv` trunk (`turn_resolve --cfv`): `backup` backs the trunk's
+averaged leaf values (`leafcfv.npy`) up through its average turn strategy, no network call;
+`onpolicy` is the average turn strategy's values with the network at its turn-end ranges.
+GATE_T_RESULT
+
+Non-monotone gaps (the turn re-solve's gadget gap rising between checks, e.g. deal 84 'cc' p0
+3.8e-3 at 200 to 5.9e-3 at 300 iterations on the 20-iteration test trunk): `bench_turn_resolve
+--current --amp on|off` on `g4pre_Td5c2s_As9h6c` (300-iteration trunk, `backup` T values, 2080 Ti,
+gaps every 25 iterations to 500, logs/valuenet/vn_live_mono_*). Most roots fall steadily (to
+3-6e-4 pots at 300 alternating); a few plateau at 2-3e-3 with small bumps (largest: the gap at 300
+14% above the best check in simultaneous mode, 6% alternating). The same with the network in
+float32 (no AMP), so it is not mixed-precision noise: the gadget's leaf moves with the ranges (it
+is not a fixed game), so CFR's average need not improve monotonically. The current iterate is
+5-50x worse than the average at every check, so a final-iterate check doesn't help. The bump on
+the 20-iteration trunk was larger because its T values came from a solve far from converged
+(flop+turn exploitability 0.23 against the network). Fix adopted: `LeafGadget.solve(keep_best=True)`
+checks every `check_every` iterations and ends on the check with the smallest gap (its average
+strategy and averaged leaf values restored), at one network call per check (+2-3% at 20). The
+reported gap is that strategy's own, so the safety bound still applies to it.
+
 ## Real-deck solves and grades: use 300 iterations and re-solve tolerance 1e-3 (2026-11-18)
 
 `real_trunk.py` now defaults to `--iters 300` and `real_grade.py` to `--tol 1e-3`. Measured on

@@ -80,7 +80,8 @@ with a trunk solved with it.
 ## On the laptop (once)
 
 ```
-git clone git@github.com:Tatty2004/Thesis.git && cd Thesis && git checkout vn-live
+git clone git@github.com:Tatty2004/Thesis.git && cd Thesis && git checkout vn-live   # push vn-live from the cluster first
+#   (or update an existing clone: git fetch && git checkout vn-live && git pull)
 python3 -m venv .venv && .venv/bin/pip install -e . torch
 rsync -avP <netid>@wash.cs.princeton.edu:/n/fs/scratch/rb5709/viewer_pack/<name> ~/viewer_data/
 ```
