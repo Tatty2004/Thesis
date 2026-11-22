@@ -122,14 +122,18 @@ players and roots):
 |---|---|---|---|---|
 | RTX 2080 Ti (4 CPUs) | alternating 300, paired | 11.6 s | 6.5e-4 | 3.4e-3 |
 | | alternating 300, one after the other | 13.7 s | 6.5e-4 | 3.6e-3 |
+| | **alternating 200, paired (default)** | 7.8 s | 1.1e-3 | 3.9e-3 |
 | | alternating 150, paired | 5.8 s | 1.2e-3 | 4.8e-3 |
+| | alternating 100, paired | 3.9 s | 2.3e-3 | 6.1e-3 |
 | | simultaneous 300, paired | 6.5 s | 1.1e-3 | 2.9e-3 |
 | | simultaneous 200, paired | 4.3 s | 2.2e-3 | 7.0e-3 |
-| 8 x86 CPU cores (no GPU) | simultaneous 100, paired | 62 s | | |
-CPU_ROWS
+| 8 x86 CPU cores (Xeon Gold 5320, no GPU) | simultaneous 100, paired | 58 s | 6.7e-3 | 1.3e-2 |
+| | alternating 100, paired | 120 s | 2.3e-3 | 5.6e-3 |
 
-The default (alternating 200, paired) is about 7.7 s on a 2080 Ti by interpolation. River on the
-2080 Ti after a live turn (checked-down turn, viewer `--tol 1e-2`): exact (all river cards, both
+On those 8 CPU cores the exact live river took 163 s (30 / 20 iterations to `--tol 1e-2`) and the
+quick one 0.2 s.
+
+(The 200 and 100 rows are 4 other random roots.) River on the 2080 Ti after a live turn (checked-down turn, viewer `--tol 1e-2`): exact (all river cards, both
 players) 10-11 s the first time, including building the card tables; quick 0.3-0.8 s. One-time
 setup: about 10 s (game, network, flop strategy) plus about 10 s for the first live solve. Host
 memory 2.4 GB, GPU memory 3.8 GB at most (the exact river's card tables).
